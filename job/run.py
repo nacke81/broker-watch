@@ -123,6 +123,9 @@ def alert(text, key):
 
 # ---------------- the run ----------------
 
+CURRENT = {"run_id": None}  # so a failure marks only this run as failed, never another one in progress
+
+
 def run(a, E):
     db = None if a.dry else DB(E)
     profile = None
@@ -140,6 +143,7 @@ def run(a, E):
           f"{'DRY (nothing written)' if a.dry else 'writing to the database'}", flush=True)
 
     run_row = db.call("POST", "bw_runs", {"owner": db.owner})[0] if db else {"id": None}
+    CURRENT["run_id"] = run_row["id"]
 
     def saver(tag):
         def save(site, what, url, text):
@@ -246,11 +250,10 @@ def main():
         run(a, E)
     except Exception as e:
         traceback.print_exc()
-        if not a.dry:
+        if not a.dry and CURRENT["run_id"]:
             try:
                 db = DB(E)
-                rows = db.call("GET", f"bw_runs?owner=eq.{db.owner}&status=eq.running&select=id")
-                for r in rows:
+                for r in [{"id": CURRENT["run_id"]}]:
                     db.call("PATCH", f"bw_runs?id=eq.{r['id']}", {"status": "failed", "error": f"{type(e).__name__}: {str(e)[:300]}",
                                                                  "finished_at": dt.datetime.now().astimezone().isoformat()},
                             prefer="return=minimal")
