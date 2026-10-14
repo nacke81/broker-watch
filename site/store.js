@@ -14,10 +14,10 @@ export function assemble(checks, optouts) {
     const site = {
       id: id(name), name, optOut: OPT_OUT[name],
       // A site shut down (court order) holds no listing of the owner: clean, with its own note.
-      checks: rows.map((r) => ({ date: r.checked_on, result: r.result === "gone" ? "not_found" : r.result, step: r.step })),
+      checks: rows.map((r) => ({ date: r.checked_on, result: r.result === "gone" ? "not_found" : r.result, step: r.step, reason: r.reason || null })),
       siteGone: !!last && last.result === "gone",
       shows: last && last.result === "found" ? (last.gated ? "Listed (details behind a paywall)" : "Listed") : "",
-      tried: last ? last.tried : [], url: last ? last.url : null, captcha: !!last?.captcha,
+      tried: last ? last.tried : [], url: last ? last.url : null, captcha: !!last?.captcha, reason: last?.reason || null,
     };
     if (sent[name]) site.optOutSentOn = sent[name];
     return site;
@@ -29,7 +29,7 @@ export function createStore(sb) {
   return {
     async load() {
       const [checks, optouts, runs, profile] = await Promise.all([
-        sb.from("bw_checks").select("site,checked_on,result,step,tried,url,gated,captcha").order("checked_on").then(must),
+        sb.from("bw_checks").select("site,checked_on,result,step,tried,url,gated,captcha,reason").order("checked_on").then(must),
         sb.from("bw_optouts").select("site,sent_on").then(must),
         sb.from("bw_runs").select("*").order("started_at", { ascending: false }).limit(52).then(must),
         sb.from("bw_profile").select("*").maybeSingle().then(must),

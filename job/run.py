@@ -103,6 +103,15 @@ def ensure_chrome():
 
 # ---------------- alerts ----------------
 
+def notify(text):
+    """A heads-up for the owner (not a failure): Telegram only, no triage card."""
+    try:
+        r = subprocess.run(["hermes", "send", "--to", TELEGRAM, "--quiet", text], capture_output=True, text=True, timeout=60)
+        print(f"NOTIFIED: telegram rc={r.returncode}", flush=True)
+    except Exception as e:
+        print(f"NOTIFY FAILED: {type(e).__name__}", flush=True)
+
+
 def alert(text, key):
     """Failed or missed run -> Telegram to the owner + a triage card on Reed's board (idempotent per key)."""
     out = []
@@ -161,6 +170,13 @@ def run(a, E):
     from fetchers import BrowserFetcher, HttpFetcher
     block_host = re.sub(r"^www\.", "", re.match(r"https?://([^/]+)", urls[a.block]).group(1)) if a.block else None
     state = {s: {"best": None, "log": [], "done": False} for s in sites}
+    # Step 0 (slice 2): a site this PC can't even resolve is "site unreachable", not blocked. Checked fresh every run,
+    # so a site that comes back is searched again. A site blocked on purpose (--block) is never skipped here.
+    for s in sites:
+        why = ladder.unreachable(re.match(r"https?://([^/]+)", urls[s]).group(1))
+        if why:
+            state[s].update(done=True, unreachable=why)
+            print(f"{s:22} unreachable: {why} (no ladder steps: nothing to climb)", flush=True)
     with sync_playwright() as pw:
         F = {1: HttpFetcher(block_host)}
         fresh_b = None
@@ -216,11 +232,13 @@ def run(a, E):
         best = st["best"] or {"verdict": "couldnt", "step": None}
         res = ladder.final_result(best)
         counts[res] += 1
+        captcha = any(l.get("captcha") for l in st["log"])
+        reason = "unreachable" if st.get("unreachable") else "captcha" if res == "couldnt_check" and captcha else None
         checks.append({"site": site, "checked_on": today, "result": res,
                        "step": best.get("step") if res != "couldnt_check" else None,
                        "tried": [l["step"] for l in st["log"]], "evidence": best.get("evidence"),
                        "gated": bool(best.get("gated")), "url": best.get("url") or urls[site],
-                       "captcha": any(l.get("captcha") for l in st["log"]),
+                       "captcha": captcha, "reason": reason,  # same keys on every row (bulk insert)
                        "query": best.get("variant") if res != "couldnt_check" else None})
     captchas = sum(c["captcha"] for c in checks)
     json.dump({"stamp": stamp, "fake": a.fake, "block": a.block, "src": src, "checks": checks,
@@ -234,6 +252,10 @@ def run(a, E):
     print(f"RESULT found {counts['found']}, not found {counts['not_found']}, couldn't check {counts['couldnt_check']}, "
           f"gone {counts['gone']}, sites with a CAPTCHA/bot wall {captchas}", flush=True)
     print("RUN", out_dir)
+    needs = [c["site"] for c in checks if c["reason"] == "captcha"]
+    if needs and db:
+        notify(f"Broker Watch needs you: {', '.join(needs)} stopped at a CAPTCHA this week. When you're at the PC, "
+               f"open {APP_URL} → the site → \"Solve it on this PC\". One solve, then it re-checks by itself.")
     return run_row["id"]
 
 

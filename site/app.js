@@ -1,4 +1,4 @@
-import { siteStatus, sortSites, summary, runHistory, sortedChecks, fmtDate, STATUS, LADDER, RESULT, addPhone, addAddress, fmtPhone } from './logic.js';
+import { needsSolve, siteStatus, sortSites, summary, runHistory, sortedChecks, fmtDate, STATUS, LADDER, RESULT, addPhone, addAddress, fmtPhone } from './logic.js';
 import { createStore } from './store.js';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
@@ -28,7 +28,7 @@ async function act(fn) { // every write: do it, then reload from the database so
 
 const CLS = {
   [STATUS.FOUND]: 's-found', [STATUS.CAME_BACK]: 's-came-back', [STATUS.COULDNT]: 's-couldnt',
-  [STATUS.REQUESTED]: 's-requested', [STATUS.GONE]: 's-gone', [STATUS.NOT_FOUND]: 's-not-found', [STATUS.NEVER]: 's-never',
+  [STATUS.REQUESTED]: 's-requested', [STATUS.UNREACHABLE]: 's-never', [STATUS.GONE]: 's-gone', [STATUS.NOT_FOUND]: 's-not-found', [STATUS.NEVER]: 's-never',
 };
 const pill = (st) => `<span class="pill ${CLS[st]}">${esc(st)}</span>`;
 const today = () => day(new Date());
@@ -48,6 +48,7 @@ function sitesView() {
   const groups = [
     ['Needs you', (st) => st === STATUS.FOUND || st === STATUS.CAME_BACK || st === STATUS.COULDNT],
     ['Waiting on the site', (st) => st === STATUS.REQUESTED],
+    ["Can't reach from your PC", (st) => st === STATUS.UNREACHABLE],
     ['Clean', (st) => st === STATUS.GONE || st === STATUS.NOT_FOUND || st === STATUS.NEVER],
   ];
   const sorted = sortSites(state.sites);
@@ -76,7 +77,9 @@ function rowHtml(site) {
   const checks = sortedChecks(site);
   const last = checks[checks.length - 1];
   let meta = site.shows ? esc(site.shows) : 'No listing for you';
-  if (st === STATUS.COULDNT) meta = `Blocked: tried ${site.tried?.length ?? 0} of 7 ladder steps`;
+  if (st === STATUS.COULDNT) meta = needsSolve(site) ? 'CAPTCHA: needs you to solve it once, on the PC'
+    : `Blocked: tried ${new Set(site.tried || []).size} of 7 ladder steps`;
+  if (st === STATUS.UNREACHABLE) meta = 'The site doesn\'t answer from your PC. Not a block, not "not found"';
   if (st === STATUS.REQUESTED) meta = `Opt-out sent ${fmtDate(site.optOutSentOn)} · still listed`;
   if (st === STATUS.CAME_BACK) meta = `Was gone, listed again ${fmtDate(last.date)}`;
   if (site.siteGone) meta = 'Site shut down (court order)';
@@ -104,10 +107,21 @@ function siteView(id) {
         const cls = tried.has(n) ? 'failed' : n === next ? 'next' : '';
         return `<li class="${cls}">${esc(l)}${n === next ? ' ← next' : ''}</li>`;
       }).join('')}</ol>
-      ${next === 6 && site.url ? `<a class="btn" href="${esc(site.url)}" target="_blank" rel="noopener">Open it so I can solve the check</a>` : ''}
+      ${next === 6 && needsSolve(site) ? `<div class="card" data-testid="solve">
+        <b>Needs you: solve it once</b>
+        <p class="note">Every automated step stopped at a CAPTCHA. The button opens ${esc(site.name)} in the Broker Watch Chrome
+        on your PC. Solve the check there, then leave it: Broker Watch re-checks the site by itself and updates this page.
+        You get a Telegram when it's done. It has to be the PC (that browser keeps the pass); on your phone, wait until you're at it.</p>
+        <a class="btn" id="solve" href="brokerwatch://solve/${encodeURIComponent(site.name)}">Solve it on this PC</a></div>`
+        : next === 6 && site.url ? `<a class="btn ghost" href="${esc(site.url)}" target="_blank" rel="noopener">Open the site</a>` : ''}
       ${site.captcha ? `<p class="note">The site showed a CAPTCHA or bot wall this week.</p>` : ''}
       ${next === 7 ? `<p class="note">Only paid options left. Nothing is spent without your yes.</p><button class="btn ghost" id="paid">Ask me about a paid option</button>` : ''}
       <div class="ok" id="loopMsg"></div></div>`;
+  } else if (st === STATUS.UNREACHABLE) {
+    ladder = `<div class="card" data-testid="unreachable"><b>Site unreachable from your PC.</b>
+      <p class="note">The site's address doesn't lead anywhere from your home connection (no DNS answer, or it's pointed back at
+      your own PC). That's the network, not the site blocking us, so there's no ladder to climb. Nothing here counts as
+      "not found". Every weekly check tries again, and it's searched as soon as it answers.</p></div>`;
   } else if (last) {
     ladder = `<p class="note">Checked ${fmtDate(last.date)}${last.step ? ` using step ${last.step}: ${esc(LADDER[last.step])}` : ''}.</p>
       ${listedNow(site) && site.url ? `<p><a href="${esc(site.url)}" target="_blank" rel="noopener">See the page it found</a></p>` : ''}`;
@@ -119,7 +133,7 @@ function siteView(id) {
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <h3 style="margin:0">${esc(site.name)}</h3>${pill(st)}
       </div>
-      ${listed ? `<p><b>What it shows:</b> ${esc(site.shows)}</p>` : st === STATUS.COULDNT ? '' : `<p>No listing for you here.</p>`}
+      ${listed ? `<p><b>What it shows:</b> ${esc(site.shows)}</p>` : st === STATUS.COULDNT || st === STATUS.UNREACHABLE ? '' : `<p>No listing for you here.</p>`}
       ${ladder}
       <div class="hist">${checks.map((c) => `<i class="${c.result}" title="${fmtDate(c.date)}: ${c.result.replace('_', ' ')}"></i>`).join('')}</div>
       <div class="legend">Last ${checks.length} week${checks.length === 1 ? "" : "s"}, oldest first. Red found · green not there · amber couldn't check</div>
@@ -136,7 +150,7 @@ function siteView(id) {
       </div>
     </div>` : ''}
     <div class="card"><b>History</b><table><tr><th>Week</th><th>Result</th><th>Step</th></tr>
-      ${[...checks].reverse().map((c) => `<tr><td>${fmtDate(c.date)}</td><td>${c.result === RESULT.FOUND ? 'Found' : c.result === RESULT.NOT_FOUND ? 'Not there' : "Couldn't check"}</td><td>${c.result === RESULT.COULDNT ? 'Blocked at every step tried' : esc(LADDER[c.step] ?? '')}</td></tr>`).join('')}
+      ${[...checks].reverse().map((c) => `<tr><td>${fmtDate(c.date)}</td><td>${c.result === RESULT.FOUND ? 'Found' : c.result === RESULT.NOT_FOUND ? 'Not there' : "Couldn't check"}</td><td>${c.result !== RESULT.COULDNT ? esc(LADDER[c.step] ?? '') : c.reason === 'unreachable' ? 'Site unreachable' : c.reason === 'captcha' ? 'CAPTCHA at every step' : 'Blocked at every step tried'}</td></tr>`).join('')}
     </table></div>`;
 
   document.getElementById('back').onclick = () => go('#sites');

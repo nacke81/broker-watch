@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { siteStatus, STATUS, summary, runHistory, sortSites } from '../site/logic.js';
+import { siteStatus, STATUS, summary, runHistory, sortSites, needsSolve } from '../site/logic.js';
 import { SITES } from './seed.js';
 
 const site = (results, extra = {}) => ({
@@ -41,7 +41,7 @@ test('dates compare as times, not strings (out-of-order history)', () => {
 
 test('fake seed: summary and order', () => {
   const s = summary(SITES);
-  assert.deepEqual(s, { listed: 7, action: 7, couldnt: 2, clean: 6 });
+  assert.deepEqual(s, { listed: 7, action: 7, couldnt: 2, unreachable: 0, clean: 6 });
   assert.equal(sortSites(SITES)[0].name, 'BeenVerified', 'came back sorts first');
   const h = runHistory(SITES);
   assert.equal(h.length, 5);
@@ -73,4 +73,25 @@ test('addresses: street + city + state required (the check searches each old cit
   let r = addAddress([], '123 Example St, Springfield IL, 62701'); assert.equal(r.list.length, 1);
   r = addAddress(r.list, '123 example st,  Springfield IL, 62701'); assert.equal(r.list.length, 1, 'same address twice is kept once');
   r = addAddress(r.list, 'somewhere'); assert.match(r.error, /city and state/); assert.equal(r.list.length, 1);
+});
+
+// Slice 2: why a site couldn't be checked. Neither reason may ever read as "not found".
+const why = (results, reason) => ({ name: 'X', checks: results.map((r, i) => ({ date: `2026-09-${10 + i}`, result: r,
+  reason: i === results.length - 1 ? reason : null })) });
+
+test('site unreachable is its own state, never not found, and a site that answers again leaves it', () => {
+  assert.equal(siteStatus(why(['couldnt_check'], 'unreachable')), STATUS.UNREACHABLE);
+  assert.equal(siteStatus(why(['found', 'couldnt_check'], 'unreachable')), STATUS.UNREACHABLE);
+  assert.notEqual(siteStatus(why(['found', 'couldnt_check'], 'unreachable')), STATUS.GONE);
+  assert.equal(siteStatus(why(['couldnt_check', 'found'], null)), STATUS.FOUND);
+  const s = summary([why(['couldnt_check'], 'unreachable'), why(['couldnt_check'], 'captcha')]);
+  assert.deepEqual([s.unreachable, s.couldnt, s.clean, s.action], [1, 1, 0, 1]); // unreachable isn't "needs you"
+});
+
+test('step 6: only a CAPTCHA stop asks the owner to solve; unreachable and plain blocks do not', () => {
+  assert.equal(needsSolve(why(['couldnt_check'], 'captcha')), true);
+  assert.equal(siteStatus(why(['couldnt_check'], 'captcha')), STATUS.COULDNT);
+  assert.equal(needsSolve(why(['couldnt_check'], 'unreachable')), false);
+  assert.equal(needsSolve(why(['couldnt_check'], null)), false);
+  assert.equal(needsSolve(why(['couldnt_check', 'found'], null)), false);   // solved and found: done
 });

@@ -29,11 +29,13 @@ try:
     # one finished weekly run, written like the job writes it
     r1 = api("POST", "/rest/v1/bw_runs", {"owner": uid, "status": "ok", "finished_at": "2026-10-18T10:40:00-05:00",
                                           "started_at": "2026-10-18T10:00:00-05:00", "found": 1, "not_found": 1, "couldnt": 1, "captchas": 1})[0]
-    K = {"step": None, "tried": [], "evidence": None, "url": None, "captcha": False, "gated": False}  # bulk insert: same keys on every row
+    K = {"step": None, "tried": [], "evidence": None, "url": None, "captcha": False, "gated": False, "reason": None}  # bulk insert: same keys on every row
     api("POST", "/rest/v1/bw_checks", [dict(K, **row) for row in [
         {"owner": uid, "run_id": r1["id"], "site": "Spokeo", "checked_on": "2026-10-18", "result": "found", "step": 1, "tried": [1], "evidence": "listing", "url": "https://example.com/spokeo-listing"},
         {"owner": uid, "run_id": r1["id"], "site": "Whitepages", "checked_on": "2026-10-18", "result": "couldnt_check", "tried": [1, 2, 3, 4, 5], "captcha": True, "url": "https://example.com/wp"},
         {"owner": uid, "run_id": r1["id"], "site": "AnyWho", "checked_on": "2026-10-18", "result": "not_found", "step": 2, "tried": [1, 2]},
+        {"owner": uid, "run_id": r1["id"], "site": "Nuwber", "checked_on": "2026-10-18", "result": "couldnt_check", "tried": [], "reason": "unreachable"},
+        {"owner": uid, "run_id": r1["id"], "site": "SearchPeopleFree", "checked_on": "2026-10-18", "result": "couldnt_check", "tried": [1, 2, 3, 4, 5], "captcha": True, "reason": "captcha", "url": "https://example.com/spf"},
     ]])
     exe = sorted(glob.glob(os.path.expandvars(r"%LOCALAPPDATA%/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-win64/chrome-headless-shell.exe")))
     with sync_playwright() as p:
@@ -59,6 +61,21 @@ try:
         pg.locator("[data-testid=row]", has_text="Whitepages").click(); pg.wait_for_selector("#back")
         check("couldn't-check site: says it's never counted as not found, notes the CAPTCHA",
               'never counted as "not found"' in pg.locator("#app").inner_text() and "CAPTCHA" in pg.locator("#app").inner_text())
+        pg.locator("#back").click()
+        # Slice 2: unreachable is its own group and never "not found"; a CAPTCHA stop asks for one solve on the PC.
+        pg.wait_for_selector("[data-testid=row] >> text=Nuwber")
+        txt = pg.locator("#app").inner_text()
+        nu = pg.locator("[data-testid=row]", has_text="Nuwber").inner_text()
+        check("unreachable site: own group + pill, never Not found", "can't reach from your pc (1)" in txt.lower() and "Site unreachable" in nu and "Not found" not in nu)
+        check("Whitepages (plain block) is not asked to solve", "needs you to solve" not in pg.locator("[data-testid=row]", has_text="Whitepages").inner_text())
+        check("CAPTCHA site row says it needs one solve", "needs you to solve it once" in pg.locator("[data-testid=row]", has_text="SearchPeopleFree").inner_text())
+        pg.locator("[data-testid=row]", has_text="SearchPeopleFree").click(); pg.wait_for_selector("[data-testid=solve]")
+        check("solve button opens the PC handler for exactly this site",
+              pg.locator("#solve").get_attribute("href") == "brokerwatch://solve/SearchPeopleFree")
+        pg.locator("#back").click()
+        pg.locator("[data-testid=row]", has_text="Nuwber").click(); pg.wait_for_selector("[data-testid=unreachable]")
+        check("unreachable site page explains it's the network, with no solve button",
+              "not the site blocking us" in pg.locator("#app").inner_text() and pg.locator("#solve").count() == 0)
         pg.locator("#back").click()
         pg.locator("[data-testid=row]", has_text="Spokeo").click(); pg.wait_for_selector("#sent")
         check("found site links the page it found", pg.locator("a", has_text="See the page it found").get_attribute("href") == "https://example.com/spokeo-listing")

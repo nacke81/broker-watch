@@ -108,6 +108,26 @@ def main():
     check("GOLDEN 3: blocked on purpose reads couldn't check", ladder.final_result(blocked) == "couldnt_check")
     check("GOLDEN 3 control: an unblocked site in the same run still finds the subject", control["verdict"] == "me")
 
+    # ---- slice 2: site unreachable (DNS fact) vs blocked; positive control = a site that resolves
+    dns = {"nuwber.com": OSError("no such host"), "clustrmaps.com": ["127.0.0.1"], "v6.example": ["::1"],
+           "thatsthem.com": ["104.21.3.4"], "mixed.example": ["127.0.0.1", "104.21.3.4"]}
+    def fake_resolve(h):
+        v = dns[h]
+        if isinstance(v, Exception): raise v
+        return v
+    U = lambda h: ladder.unreachable(h, fake_resolve)
+    check("no DNS record reads site unreachable", U("nuwber.com") == "no DNS record for the site")
+    check("DNS pointed at this PC (127.0.0.1 / ::1) reads site unreachable", bool(U("clustrmaps.com")) and bool(U("v6.example")))
+    check("control: a site with a public address is reachable (gets the ladder)", U("thatsthem.com") is None)
+    check("one public address among loopbacks is still reachable", U("mixed.example") is None)
+    check("a bot wall is never 'unreachable': it answers, so it stays couldn't check",
+          judge.classify_page(403, "u", page("fake", "Whitepages__s1__search.txt"), FAKE) == "blocked")
+    import solve as S
+    check("the brokerwatch:// link accepts only known site names",
+          S.parse_target("brokerwatch://solve/SearchPeopleFree/") == "SearchPeopleFree" and S.parse_target("searchpeoplefree") == "SearchPeopleFree"
+          and S.parse_target("brokerwatch://solve/Evil&calc") is None and S.parse_target("brokerwatch://solve/%COMSPEC%") is None
+          and S.parse_target("brokerwatch://solve/NotASite") is None)
+
     # ---- the 404 fix (carry item 2): genuine "no such person" 404s read not found, only on proven sites
     bv404 = page("fake", "BeenVerified__s2__search.txt")
     check("404 'no such person' page on a proven site reads not found",

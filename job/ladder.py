@@ -86,6 +86,21 @@ def side_door(fetcher, site, url, p, save=None):
     return out
 
 
+def unreachable(host, resolve=None):
+    """Ladder step 0, a fact about the network, not the site: None if the host resolves to a public address,
+    else a short reason. Nuwber (no DNS record) and ClustrMaps (resolves to 127.0.0.1) answer like this from the
+    owner's PC on 2026-10-13/14, the same from his router and from 1.1.1.1. A bot wall is never this: it answers."""
+    import ipaddress, socket
+    resolve = resolve or (lambda h: [a[4][0] for a in socket.getaddrinfo(h, 443)])
+    try:
+        ips = set(resolve(host))
+    except OSError:
+        return "no DNS record for the site"
+    if ips and all(ipaddress.ip_address(i.split("%")[0]).is_loopback or ipaddress.ip_address(i.split("%")[0]).is_unspecified for i in ips):
+        return "DNS points the site at this PC (blocked upstream)"
+    return None
+
+
 def better(a, b):
     """The more informative of two step results (a real answer beats couldn't check)."""
     return b if a is None or RANK[b["verdict"]] > RANK[a["verdict"]] else a

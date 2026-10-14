@@ -57,6 +57,10 @@ create table if not exists public.bw_checks (             -- one row per site pe
 -- Slice 1: which query found it (alt-first-name | past-city-N | phone-N | address-N; null = the plain name search).
 alter table public.bw_checks add column if not exists query text;
 
+-- Slice 2: why a site couldn't be checked. unreachable = no DNS / DNS points at this PC (not the site blocking us);
+-- captcha = a CAPTCHA or bot wall stopped every step, so it goes to the owner (ladder step 6).
+alter table public.bw_checks add column if not exists reason text check (reason in ('unreachable', 'captcha'));
+
 create table if not exists public.bw_optouts (            -- the owner marks "I sent the opt-out"
   owner       uuid not null default auth.uid() references auth.users(id) on delete cascade,
   site        text not null,

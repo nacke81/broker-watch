@@ -9,6 +9,7 @@ export const STATUS = {
   CAME_BACK: 'Came back',
   NOT_FOUND: 'Not found',
   COULDNT: "Couldn't check",
+  UNREACHABLE: 'Site unreachable',
   NEVER: 'Not checked yet',
 };
 
@@ -34,7 +35,7 @@ export function siteStatus(site) {
   const checks = sortedChecks(site);
   if (!checks.length) return STATUS.NEVER;
   const last = checks[checks.length - 1];
-  if (last.result === RESULT.COULDNT) return STATUS.COULDNT;
+  if (last.result === RESULT.COULDNT) return last.reason === 'unreachable' ? STATUS.UNREACHABLE : STATUS.COULDNT;
 
   // Only real answers count for history.
   const real = checks.filter((c) => c.result !== RESULT.COULDNT);
@@ -57,6 +58,7 @@ const RANK = {
   [STATUS.FOUND]: 1,
   [STATUS.COULDNT]: 2,
   [STATUS.REQUESTED]: 3,
+  [STATUS.UNREACHABLE]: 4,
   [STATUS.NEVER]: 4,
   [STATUS.GONE]: 5,
   [STATUS.NOT_FOUND]: 6,
@@ -66,17 +68,24 @@ export function needsAction(status) {
   return status === STATUS.FOUND || status === STATUS.CAME_BACK || status === STATUS.COULDNT;
 }
 
+// Step 6: a CAPTCHA stopped every automated step, so the owner solves it once on the PC.
+export function needsSolve(site) {
+  const c = sortedChecks(site), last = c[c.length - 1];
+  return !!last && last.result === RESULT.COULDNT && last.reason === 'captcha';
+}
+
 export function sortSites(sites) {
   return [...sites].sort((a, b) => RANK[siteStatus(a)] - RANK[siteStatus(b)] || a.name.localeCompare(b.name));
 }
 
 export function summary(sites) {
-  const s = { listed: 0, action: 0, couldnt: 0, clean: 0 };
+  const s = { listed: 0, action: 0, couldnt: 0, unreachable: 0, clean: 0 };
   for (const site of sites) {
     const st = siteStatus(site);
     if ([STATUS.FOUND, STATUS.CAME_BACK, STATUS.REQUESTED].includes(st)) s.listed++;
     if (needsAction(st)) s.action++;
     if (st === STATUS.COULDNT) s.couldnt++;
+    if (st === STATUS.UNREACHABLE) s.unreachable++;
     if (st === STATUS.GONE || st === STATUS.NOT_FOUND) s.clean++;
   }
   return s;
