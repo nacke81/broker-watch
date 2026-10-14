@@ -103,10 +103,20 @@ def ensure_chrome():
 
 # ---------------- alerts ----------------
 
+def hermes_cmd():
+    """hermes.exe by absolute path: the brokerwatch:// handler starts pythonw with no venv on PATH."""
+    import shutil
+    return shutil.which("hermes") or os.path.join(os.path.dirname(sys.executable), "hermes.exe")
+
+
 def notify(text):
     """A heads-up for the owner (not a failure): Telegram only, no triage card."""
     try:
-        r = subprocess.run(["hermes", "send", "--to", TELEGRAM, "--quiet", text], capture_output=True, text=True, timeout=60)
+        r = subprocess.run([hermes_cmd(), "send", "--to", TELEGRAM, "--quiet", text], capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL, env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if r.returncode:
+            print(f"NOTIFY stderr: {(r.stderr or '')[-300:]}", flush=True)
         print(f"NOTIFIED: telegram rc={r.returncode}", flush=True)
     except Exception as e:
         print(f"NOTIFY FAILED: {type(e).__name__}", flush=True)
@@ -116,7 +126,8 @@ def alert(text, key):
     """Failed or missed run -> Telegram to the owner + a triage card on Reed's board (idempotent per key)."""
     out = []
     try:
-        r = subprocess.run(["hermes", "send", "--to", TELEGRAM, "--quiet", text], capture_output=True, text=True, timeout=60)
+        r = subprocess.run([hermes_cmd(), "send", "--to", TELEGRAM, "--quiet", text], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL, env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         out.append(f"telegram rc={r.returncode}")
     except Exception as e:
         out.append(f"telegram failed: {type(e).__name__}")
@@ -233,7 +244,10 @@ def run(a, E):
         res = ladder.final_result(best)
         counts[res] += 1
         captcha = any(l.get("captcha") for l in st["log"])
-        reason = "unreachable" if st.get("unreachable") else "captcha" if res == "couldnt_check" and captcha else None
+        # Step 6 only helps if the saved-profile Chrome (steps 3+, the one the owner solves in) hit a CAPTCHA. A step-1
+        # 403 page with a CAPTCHA, then quiet redirects on 3+, is a block nobody can solve (SearchPeopleFree, 2026-10-14).
+        wall3 = any(l.get("captcha") for l in st["log"] if (l.get("step") or 0) >= 3)
+        reason = "unreachable" if st.get("unreachable") else "captcha" if res == "couldnt_check" and wall3 else None
         checks.append({"site": site, "checked_on": today, "result": res,
                        "step": best.get("step") if res != "couldnt_check" else None,
                        "tried": [l["step"] for l in st["log"]], "evidence": best.get("evidence"),

@@ -158,6 +158,11 @@ function siteView(id) {
   if (sent) sent.onclick = () => act(() => store.markSent(user.id, site.name, today()));
   const unsent = document.getElementById('unsent');
   if (unsent) unsent.onclick = () => act(() => store.unmarkSent(site.name));
+  const solveBtn = document.getElementById('solve');
+  if (solveBtn) solveBtn.addEventListener('click', () => {
+    document.getElementById('loopMsg').textContent = 'Started on your PC. Solve the check in the Chrome window if one shows; '
+      + 'the re-check takes a few minutes. You get a Telegram, then reload this page.';
+  });
   const paid = document.getElementById('paid');
   if (paid) paid.onclick = () => { document.getElementById('loopMsg').textContent = 'Coming in a later slice. For now, tell Reed in chat: he comes back with a price for your yes or no.'; };
 }

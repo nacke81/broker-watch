@@ -71,7 +71,7 @@ def write_result(db, site, best):
     db.call("PATCH", f"bw_checks?id=eq.{rows[0]['id']}", {
         "result": res, "step": 6 if res != "couldnt_check" else None, "tried": sorted(set(rows[0]["tried"] + [6])),
         "evidence": best.get("evidence"), "url": best.get("url"), "captcha": True,
-        "reason": None if res != "couldnt_check" else "captcha",
+        "reason": "captcha" if res == "couldnt_check" and best.get("captcha") else None,
         "query": best.get("variant") if res != "couldnt_check" else None}, prefer="return=minimal")
     allc = db.call("GET", f"bw_checks?run_id=eq.{rid}&select=result")
     n = {k: sum(c["result"] == k for c in allc) for k in ("found", "not_found", "couldnt_check", "gone")}
@@ -118,11 +118,12 @@ def solve(site, E, dry=False, wait_s=WAIT_S):
             return 2
         best = recheck(BrowserFetcher(ctx, "chrome-profile", human=True), site, url, p, save)
     res = ladder.final_result(best)
-    print(f"RESULT {site}: {res}" + ("" if res != "couldnt_check" else " (the wall came back after the solve)"), flush=True)
+    why = "" if res != "couldnt_check" else " (CAPTCHA again)" if best.get("captcha") else " (blocked without a CAPTCHA: nothing to solve)"
+    print(f"RESULT {site}: {res}{why}", flush=True)
     print(("DRY: nothing written" if dry else write_result(reader, site, best)), flush=True)
     if not dry:
         R.notify(f"Broker Watch: {site} re-checked after your solve: " + {"found": "it lists you", "not_found": "no listing of you",
-                 "gone": "site gone", "couldnt_check": "the wall came back, still couldn't check"}[res] + ". The app is updated.")
+                 "gone": "site gone", "couldnt_check": "still couldn't check" + why}[res] + ". The app is updated.")
     print("RUN", out_dir)
     return 0 if res != "couldnt_check" else 3
 
