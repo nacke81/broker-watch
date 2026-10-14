@@ -135,9 +135,19 @@ def main():
         check(f"slice 1: {n} with no listing reachable is never claimed (got {r['verdict']})", r["verdict"] != "me")
     # self-check: judging that address page on its cards claims "me" (a relatives list runs into the next
     # person's age). If this ever stops being true, the guard above is no longer proving anything.
+    # Root cause: the subject's name inside a "Related to / Relatives:" line, read with the next person's age.
     r = ladder.run_step(Fixture(s1("cbc_address_page")), "CyberBackgroundChecks", "https://example.com/a", SUBJ, cards=True)
-    check("self-check: card-judging the address page would claim the subject (why cards are off there)",
-          r["verdict"] == "me" and S1["cbc_address_page"]["verdict"] == "me")
+    check("relatives-line rule: even card-judged, the address page is not claimed", r["verdict"] != "me", r["verdict"])
+    check("relatives-line rule: a listing whose only subject-name is in its Relatives line is not claimed",
+          judge.judge_listing(s1("fps_listing_relative_line"), SUBJ)["verdict"] != "me")
+    real_kin = judge.in_kin_line
+    judge.in_kin_line = lambda t, i: False
+    try:
+        r = ladder.run_step(Fixture(s1("cbc_address_page")), "CyberBackgroundChecks", "https://example.com/a", SUBJ, cards=True)
+        check("self-check: with the relatives-line rule off, both real pages claim the subject (the rule is load-bearing)",
+              r["verdict"] == "me" and judge.judge_listing(s1("fps_listing_relative_line"), SUBJ)["verdict"] == "me")
+    finally:
+        judge.in_kin_line = real_kin
     check("slice 1: the father's listing reached from his address reads not-me",
           judge.judge_listing(s1("cbc_address_listing_father"), SUBJ)["verdict"] == "other")
     for n in S1:

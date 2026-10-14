@@ -1,7 +1,7 @@
 {
  "cbc_address_page": {
   "kind": "cards",
-  "verdict": "me"
+  "verdict": "other"
  },
  "cbc_address_listing_father": {
   "kind": "listing",
@@ -14,5 +14,9 @@
  "tps_address_page": {
   "kind": "cards",
   "verdict": "other"
+ },
+ "fps_listing_relative_line": {
+  "kind": "listing",
+  "verdict": "no-name"
  }
 }

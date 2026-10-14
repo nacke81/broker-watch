@@ -70,12 +70,24 @@ def age_ok(v, kind, age):
     return (v <= age < v + 10) if kind == "decade" else abs(v - age) <= 1
 
 
+# A line listing other people ("Relatives: A • B • the subject's name"): a name there is never the page's subject,
+# and the next age after it belongs to whoever comes next (seen 2026-10-14 on a FastPeopleSearch listing).
+KIN_LINE = re.compile(r"(?i)^\s*(relatives?|possible relatives|related to|associated with|associates|possible associates|"
+                      r"family members?|neighbors?|household members?|also lived here|others at this address)\b")
+
+
+def in_kin_line(t, i):
+    start = t.rfind("\n", 0, i) + 1
+    return bool(KIN_LINE.match(t[start:i + 1]))
+
+
 def judge_listing(text, p):
-    """Individual listing page: subject = first full-name hit; subject age = first age after it."""
+    """Individual listing page: subject = first full-name hit (not inside a relatives line); age = first age after it."""
     t = clean(text)
     low = t.lower(); F, L = p["first"].lower(), p["last"].lower(); alt = p["alt_first"].lower()
     idx = [m.start() for m in re.finditer(re.escape(L), low)]
-    idx = [i for i in idx if F in low[max(0, i - 40):i] or alt in low[max(0, i - 40):i] or F in low[i:i + 40]]
+    idx = [i for i in idx if (F in low[max(0, i - 40):i] or alt in low[max(0, i - 40):i] or F in low[i:i + 40])
+           and not in_kin_line(t, i)]
     if not idx:
         return {"subject": None, "verdict": "no-name"}
     tail = t[idx[0]:idx[0] + 1500]
@@ -93,7 +105,7 @@ def judge_cards(text, p):
     cards = []
     for m in re.finditer(re.escape(L), low):
         i = m.start()
-        if not (F in low[max(0, i - 40):i] or alt in low[max(0, i - 40):i]):
+        if not (F in low[max(0, i - 40):i] or alt in low[max(0, i - 40):i]) or in_kin_line(t, i):
             continue
         window = t[i:i + 260]
         nxt = low.find(L, i + len(L) + 5)
