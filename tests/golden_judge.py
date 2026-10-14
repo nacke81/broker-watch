@@ -126,6 +126,39 @@ def main():
     finally:
         ladder.classify_page = real_cls
 
+    # ---- slice 1: reverse-phone and address pages (ladder step 5) -----------------------------------------
+    # They list everyone tied to a number or a house. Only an individual listing may decide "me".
+    S1 = json.load(open(os.path.join(FX, "slice1", "slice1.json"), encoding="utf-8"))
+    s1 = lambda n: page("slice1", n + ".txt")  # noqa: E731
+    for n in ("cbc_address_page", "fps_phone_page", "tps_address_page"):
+        r = ladder.run_step(Fixture(s1(n)), n.split("_")[0], "https://example.com/" + n, SUBJ, cards=False)
+        check(f"slice 1: {n} with no listing reachable is never claimed (got {r['verdict']})", r["verdict"] != "me")
+    # self-check: judging that address page on its cards claims "me" (a relatives list runs into the next
+    # person's age). If this ever stops being true, the guard above is no longer proving anything.
+    r = ladder.run_step(Fixture(s1("cbc_address_page")), "CyberBackgroundChecks", "https://example.com/a", SUBJ, cards=True)
+    check("self-check: card-judging the address page would claim the subject (why cards are off there)",
+          r["verdict"] == "me" and S1["cbc_address_page"]["verdict"] == "me")
+    check("slice 1: the father's listing reached from his address reads not-me",
+          judge.judge_listing(s1("cbc_address_listing_father"), SUBJ)["verdict"] == "other")
+    for n in S1:
+        fn = judge.judge_listing if S1[n]["kind"] == "listing" else judge.judge_cards
+        if n != "cbc_address_page":
+            check(f"made-up person on {n}: not claimed", fn(s1(n), FAKE)["verdict"] != "me")
+
+    # step 5 builds a query per phone, past city and address, only on sites that take them
+    from sites import step5_queries, parse_address
+    P5 = dict(SUBJ, phones=["5550100199", "5550100200"],
+              addresses=["1 Elm St, Springfield IL, 62701", "2 Oak Rd, Shelbyville, IL 62565", "3 Pine Ln, Ogden IL", "junk"])
+    q = {s: [v for v, _, _ in step5_queries(P5, s)] for s in ("USPhoneBook", "Spokeo", "BeenVerified")}
+    check("step 5 on a phone+address site: alt name, 2 past cities, 2 phones, 3 parseable addresses", q["USPhoneBook"] ==
+          ["alt-first-name", "past-city-1", "past-city-2", "phone-1", "phone-2", "address-1", "address-2", "address-3"], str(q["USPhoneBook"]))
+    check("step 5 on a name-only site: no phone or address queries", q["Spokeo"] == ["alt-first-name", "past-city-1", "past-city-2"]
+          and q["BeenVerified"] == ["alt-first-name"], str(q))
+    check("step 5 URLs carry the past city and the phone", "Shelbyville" in step5_queries(P5, "Spokeo")[1][2]
+          and "555-010-0200" in step5_queries(P5, "USPhoneBook")[4][2])
+    check("addresses parse the same way the app does", parse_address("2 Oak Rd, Shelbyville, IL 62565")["city"] == "Shelbyville"
+          and parse_address("junk") is None and parse_address("Main St, Ogden IL") is None)
+
     # the app's site list and opt-out links are generated from job/sites.py: they must match
     import re as _re
     from sites import OPT_OUT

@@ -12,9 +12,13 @@ from judge import (BAD_LINK, classify_page, is_challenge, judge_cards, judge_lis
 RANK = {"me": 4, "not-me": 3, "none": 3, "gone": 3, "couldnt": 0}
 
 
-def run_step(fetcher, site, url, p, none_on_404=False, save=None):
+def run_step(fetcher, site, url, p, none_on_404=False, save=None, cards=True):
     """One ladder step (1-3, or 5 with a changed query) on one site. Returns a dict with 'verdict' in
-    me | not-me | none | gone | couldnt, plus evidence, listing url and whether a CAPTCHA/bot wall was hit."""
+    me | not-me | none | gone | couldnt, plus evidence, listing url and whether a CAPTCHA/bot wall was hit.
+
+    cards=False for reverse-phone and address pages: they list everyone tied to a number or a house, with
+    relatives' lists running into the next person's age, so only an individual listing may decide (seen
+    2026-10-14: a different person of the owner's age right after a relatives list read as \"me\" on a card)."""
     save = save or (lambda *a: None)
     status, final, text, links = fetcher.fetch(url, f"{site} search")
     save(site, "search", final, text)
@@ -35,14 +39,14 @@ def run_step(fetcher, site, url, p, none_on_404=False, save=None):
         results.append(dict(judge_listing(t2, p), url=fin2))
     rec["listings"] = [r.get("verdict") for r in results]
     v = site_verdict(results)
-    if v == "unknown":  # no usable free listing: judge the result cards (gated sites land here)
+    if v == "unknown" and cards:  # no usable free listing: judge the result cards (gated sites land here)
         j = judge_cards(text, p)
         rec["cards"] = j
         v = {"me": "me", "other": "not-me"}.get(j["verdict"], "unknown")
         rec["evidence"], rec["url"] = "card", final
         if v == "me" and re.search(r"(?i)open report|view full report|view report|unlock", text):
             rec["gated"] = True
-    else:
+    elif v != "unknown":
         rec["evidence"] = "listing"
         rec["url"] = next((r["url"] for r in results if r.get("verdict") == ("me" if v == "me" else "other")), final)
     if v == "unknown":

@@ -41,7 +41,7 @@ export function createStore(sb) {
     async unmarkSent(site) { must(await sb.from("bw_optouts").delete().eq("site", site)); },
     async saveProfile(owner, p) {
       must(await sb.from("bw_profile").upsert({ owner, names: p.names, addresses: p.addresses, city_state: p.cityState,
-        phone: p.phone, birth_year: p.birthYear, updated_at: new Date().toISOString() }));
+        phones: p.phones, birth_year: p.birthYear, updated_at: new Date().toISOString() }));
     },
   };
 }

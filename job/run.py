@@ -18,7 +18,7 @@ import argparse, datetime as dt, json, os, re, subprocess, sys, time, traceback,
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import ladder  # noqa: E402
-from sites import NONE_ON_404, SITES, STATES, site_urls  # noqa: E402
+from sites import NONE_ON_404, SITES, STATES, site_urls, step5_queries  # noqa: E402
 
 BW = os.path.expandvars(r"%LOCALAPPDATA%/broker-watch")
 ENV_FILE = os.path.expandvars(r"%LOCALAPPDATA%/hermes/.env")
@@ -62,17 +62,21 @@ def subject(profile, E, fake=False):
     """Build the judge's subject from My details (bw_profile) or the .env fallback."""
     if profile and profile.get("names") and profile.get("city_state") and profile.get("birth_year"):
         names, cs, by, src = profile["names"], profile["city_state"], int(profile["birth_year"]), "app"
+        phones, addrs = profile.get("phones") or [], profile.get("addresses") or []
     else:
         names = [n.strip() for n in E["BROKER_WATCH_NAMES"].split(";") if n.strip()]
         cs, by, src = E["BROKER_WATCH_CITY_STATE"], int(E["BROKER_WATCH_BIRTH_YEAR"]), "env"
+        phones = [x for x in E.get("BROKER_WATCH_PHONE", "").split(";") if x.strip()]
+        addrs = [x.strip() for x in E.get("BROKER_WATCH_ADDRESSES", "").split(";") if x.strip()]
+    phones = [d for d in (re.sub(r"\D", "", x)[-10:] for x in phones) if len(d) == 10]
     toks = [t for t in names[0].split() if t.lower().strip(",.") not in SUF]
     first, last = toks[0], toks[-1]
     alt = next((n.split()[0] for n in names[1:] if n.split() and n.split()[0].lower() != first.lower()), first)
     parts = cs.replace(",", " ").split()
     p = {"first": first, "middle": toks[1] if len(toks) > 2 else "", "last": last, "alt_first": alt, "names": names,
          "city": " ".join(parts[:-1]), "state": parts[-1].upper(), "birth_year": by,
-         "age": dt.date.today().year - by, "year": dt.date.today().year}
-    if fake:  # negative control: every name field swapped, same city and age
+         "age": dt.date.today().year - by, "year": dt.date.today().year, "phones": phones, "addresses": addrs}
+    if fake:  # negative control: every name field swapped; same city, age, phones and addresses (they list the owner's family)
         p.update(first="Zorvath", middle="Quentin", last="Quillbeck", alt_first="Zed", names=["Zorvath Quentin Quillbeck"])
     return p, src
 
@@ -127,11 +131,10 @@ CURRENT = {"run_id": None}  # so a failure marks only this run as failed, never 
 
 
 def run(a, E):
-    db = None if a.dry else DB(E)
-    profile = None
-    if db:
-        rows = db.call("GET", f"bw_profile?owner=eq.{db.owner}&select=*")
-        profile = rows[0] if rows else None
+    reader = DB(E)  # a dry run still reads My details (only reads; it never writes)
+    db = None if a.dry else reader
+    rows = reader.call("GET", f"bw_profile?owner=eq.{reader.owner}&select=*")
+    profile = rows[0] if rows else None
     p, src = subject(profile, E, fake=a.fake)
     sites = a.sites.split(",") if a.sites else list(SITES)
     steps = [int(s) for s in a.steps.split(",")]
@@ -168,30 +171,41 @@ def run(a, E):
             print("chrome (saved profile):", ensure_chrome(), flush=True)
             F[3] = BrowserFetcher(pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}").contexts[0],
                                   "chrome-profile", human=True, block_host=block_host)
+        def attempt(step, site, fn, variant=None):
+            st = state[site]
+            t0 = time.time()
+            try:
+                r = fn()
+            except Exception as e:
+                r = {"verdict": "couldnt", "error": f"{type(e).__name__}: {str(e)[:100]}"}
+            r["step"], r["secs"] = step, round(time.time() - t0, 1)
+            if variant:
+                r["variant"] = variant
+            st["log"].append(r)
+            st["best"] = ladder.better(st["best"], r)
+            print(f"{site:22} step {step}{' ' + variant if variant else ''}: {r['verdict']:8} page={r.get('page')} "
+                  f"ev={r.get('evidence')}{' CAPTCHA' if r.get('captcha') else ''} {r.get('error', '')}", flush=True)
+            if r["verdict"] in ("me", "gone"):
+                st["done"] = True
+
         for step in steps:  # rounds: one step across every open site, so no site gets a burst of hits
+            if step == 5:  # change the query: other first name, past cities, each phone, each address
+                Q = {s: step5_queries(p, s) for s in sites}
+                for k in range(max([len(q) for q in Q.values()] or [0])):  # round-robin: query k on every site, then k+1
+                    for site in sites:
+                        if state[site]["done"] or k >= len(Q[site]):
+                            continue
+                        variant, kind, url = Q[site][k]
+                        attempt(5, site, lambda: ladder.run_step(F[3], site, url, p, site in NONE_ON_404 and kind == "name",
+                                                                 saver(f"s5-{variant}"), cards=(kind == "name")), variant)
+                continue
             for site in sites:
-                st = state[site]
-                if st["done"]:
+                if state[site]["done"]:
                     continue
-                t0 = time.time()
-                try:
-                    if step in (1, 2, 3):
-                        r = ladder.run_step(F[step], site, urls[site], p, site in NONE_ON_404, saver(f"s{step}"))
-                    elif step == 4:
-                        r = ladder.side_door(F[3], site, urls[site], p, saver("s4"))
-                    else:  # 5: the same site with the other first name
-                        alt = site_urls(p, first=p["alt_first"])[site]
-                        r = ladder.run_step(F[3], site, alt, p, site in NONE_ON_404, saver("s5"))
-                        r["variant"] = "alt-first-name"
-                except Exception as e:
-                    r = {"verdict": "couldnt", "error": f"{type(e).__name__}: {str(e)[:100]}"}
-                r["step"], r["secs"] = step, round(time.time() - t0, 1)
-                st["log"].append(r)
-                st["best"] = ladder.better(st["best"], r)
-                print(f"{site:22} step {step}: {r['verdict']:8} page={r.get('page')} ev={r.get('evidence')}"
-                      f"{' CAPTCHA' if r.get('captcha') else ''} {r.get('error', '')}", flush=True)
-                if r["verdict"] in ("me", "gone"):
-                    st["done"] = True
+                if step in (1, 2, 3):
+                    attempt(step, site, lambda: ladder.run_step(F[step], site, urls[site], p, site in NONE_ON_404, saver(f"s{step}")))
+                else:
+                    attempt(step, site, lambda: ladder.side_door(F[3], site, urls[site], p, saver("s4")))
         if fresh_b:
             fresh_b.close()
 
@@ -206,7 +220,8 @@ def run(a, E):
                        "step": best.get("step") if res != "couldnt_check" else None,
                        "tried": [l["step"] for l in st["log"]], "evidence": best.get("evidence"),
                        "gated": bool(best.get("gated")), "url": best.get("url") or urls[site],
-                       "captcha": any(l.get("captcha") for l in st["log"])})
+                       "captcha": any(l.get("captcha") for l in st["log"]),
+                       "query": best.get("variant") if res != "couldnt_check" else None})
     captchas = sum(c["captcha"] for c in checks)
     json.dump({"stamp": stamp, "fake": a.fake, "block": a.block, "src": src, "checks": checks,
                "ladder": {s: state[s]["log"] for s in sites}}, open(os.path.join(out_dir, "result.json"), "w"), indent=1)

@@ -53,6 +53,13 @@
   th.n, td.n { text-align:right; font-variant-numeric:tabular-nums; }
   label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
   input, textarea { width:100%; font:inherit; padding:9px; border:1px solid var(--line); border-radius:8px; }
+  .items { list-style:none; margin:0 0 6px; padding:0; }
+  .items li { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line); font-size:15px; }
+  .items li.note { border:0; }
+  .x { background:none; border:0; color:var(--red); font-size:13px; cursor:pointer; padding:4px 0 4px 8px; }
+  .add { display:flex; gap:8px; }
+  .add input { flex:1; min-width:0; }
+  .add .btn { white-space:nowrap; }
   .err { color:var(--red); font-size:13px; min-height:18px; margin-top:6px; }
   .ok { color:var(--green); font-size:13px; min-height:18px; margin-top:6px; }
   .note { font-size:13px; color:var(--muted); }

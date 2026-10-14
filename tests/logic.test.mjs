@@ -48,3 +48,29 @@ test('fake seed: summary and order', () => {
   assert.equal(h[0].date, '2026-10-13');
   assert.equal(h[0].found + h[0].not_found + h[0].couldnt_check, 15);
 });
+
+test('phones: any common format becomes 10 digits; short, long and empty are refused with a friendly error', async () => {
+  const { normPhone, addPhone, fmtPhone } = await import('../site/logic.js');
+  assert.equal(normPhone('(555) 010-0199'), '5550100199');
+  assert.equal(normPhone('+1 555.010.0199'), '5550100199');
+  assert.equal(normPhone('555-0199'), null);
+  assert.equal(normPhone('25550100199'), null);
+  assert.equal(fmtPhone('5550100199'), '(555) 010-0199');
+  let r = addPhone([], '555 010 0199'); assert.deepEqual(r, { list: ['5550100199'], error: '' });
+  r = addPhone(r.list, '(555) 010-0199'); assert.deepEqual(r.list, ['5550100199'], 'same number twice is kept once');
+  r = addPhone(r.list, '555 010 0200'); assert.equal(r.list.length, 2);
+  r = addPhone(r.list, '123'); assert.match(r.error, /10 digits/); assert.equal(r.list.length, 2);
+});
+
+test('addresses: street + city + state required (the check searches each old city); zip optional', async () => {
+  const { parseAddress, addAddress } = await import('../site/logic.js');
+  assert.deepEqual(parseAddress('123 Example St, Springfield IL, 62701'), { street: '123 Example St', city: 'Springfield', state: 'IL', zip: '62701' });
+  assert.deepEqual(parseAddress('45 Old Rd, Glen Ellyn, il 60137'), { street: '45 Old Rd', city: 'Glen Ellyn', state: 'IL', zip: '60137' });
+  assert.deepEqual(parseAddress('9 Elm Ave Apt 2, Shelbyville, IL'), { street: '9 Elm Ave Apt 2', city: 'Shelbyville', state: 'IL', zip: '' });
+  assert.equal(parseAddress('Springfield IL'), null);
+  assert.equal(parseAddress('Main St, Springfield IL'), null, 'a street needs a number');
+  assert.equal(parseAddress('123 Main St, 62701'), null);
+  let r = addAddress([], '123 Example St, Springfield IL, 62701'); assert.equal(r.list.length, 1);
+  r = addAddress(r.list, '123 example st,  Springfield IL, 62701'); assert.equal(r.list.length, 1, 'same address twice is kept once');
+  r = addAddress(r.list, 'somewhere'); assert.match(r.error, /city and state/); assert.equal(r.list.length, 1);
+});

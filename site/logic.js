@@ -99,3 +99,36 @@ export function fmtDate(d) {
   const [y, m, day] = d.split('-').map(Number);
   return `${m}/${day}/${y}`;
 }
+
+// ---- My details lists (slice 1): phones and addresses are lists, each item checked before it's added ----
+
+// "(555) 010-0199", "555.010.0199", "+1 555 010 0199" -> "5550100199"; anything else -> null.
+export function normPhone(s) {
+  let d = String(s ?? '').replace(/\D/g, '');
+  if (d.length === 11 && d[0] === '1') d = d.slice(1);
+  return d.length === 10 ? d : null;
+}
+export const fmtPhone = (d) => `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+
+// "123 Main St, Springfield IL, 62701" or "123 Main St, Springfield, IL 62701" -> {street, city, state, zip}.
+// The weekly check searches by city + state, so both must be there; zip is optional.
+export function parseAddress(s) {
+  const parts = String(s ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+  const rest = parts.slice(1).join(' ').replace(/\s+/g, ' ').trim();
+  const m = rest.match(/^([A-Za-z .'-]+?)\s+([A-Za-z]{2})(?:\s+(\d{5})(?:-\d{4})?)?$/);
+  if (!m || !/\d/.test(parts[0])) return null;
+  return { street: parts[0], city: m[1].trim(), state: m[2].toUpperCase(), zip: m[3] || '' };
+}
+
+// Add one item to a list: returns { list, error }. Duplicates are ignored, not errors.
+export function addPhone(list, s) {
+  const d = normPhone(s);
+  if (!d) return { list, error: 'Phone needs 10 digits, like (555) 010-0199.' };
+  return { list: list.includes(d) ? list : [...list, d], error: '' };
+}
+export function addAddress(list, s) {
+  const a = String(s ?? '').trim().replace(/\s+/g, ' ');
+  if (!parseAddress(a)) return { list, error: 'Address like 123 Main St, Springfield IL, 62701 (street, then city and state).' };
+  return { list: list.some((x) => x.toLowerCase() === a.toLowerCase()) ? list : [...list, a], error: '' };
+}

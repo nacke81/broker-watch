@@ -1,4 +1,4 @@
-import { siteStatus, sortSites, summary, runHistory, sortedChecks, fmtDate, STATUS, LADDER, RESULT } from './logic.js';
+import { siteStatus, sortSites, summary, runHistory, sortedChecks, fmtDate, STATUS, LADDER, RESULT, addPhone, addAddress, fmtPhone } from './logic.js';
 import { createStore } from './store.js';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
@@ -163,49 +163,96 @@ function runsView() {
 }
 
 const parseYear = (s) => { const y = Number(String(s).trim()); return Number.isInteger(y) && y >= 1900 && y <= 2020 ? y : null; };
+
+// A list of identifiers with "+ Add another": its own <form>, so Return on the iPhone keyboard adds the item.
+function listBlock(key, label, items, show, placeholder, mode) {
+  return `<div class="list" data-list="${key}">
+      <label for="${key}New">${label}</label>
+      <ul class="items" data-testid="${key}-list">${items.map((x, i) => `<li><span>${esc(show(x))}</span>
+        <button type="button" class="x" data-del="${key}" data-i="${i}" aria-label="Remove ${esc(show(x))}">Remove</button></li>`).join('')
+        || '<li class="note">None yet.</li>'}</ul>
+      <form class="add" id="${key}Form" novalidate>
+        <input id="${key}New" placeholder="${placeholder}" inputmode="${mode}" enterkeyhint="done" autocomplete="off">
+        <button class="btn ghost" type="submit" id="${key}Add">+ Add</button>
+      </form>
+    </div>`;
+}
+
 function meView() {
   const p = state.profile || {};
+  const draft = (meView.draft ||= { phones: [...(p.phones || [])], addresses: [...(p.addresses || [])] });
+  const KEEP = ['names', 'cityState', 'birthYear', 'phonesNew', 'addressesNew'];
+  const keep = KEEP.map((id) => document.getElementById(id)?.value);
   app.innerHTML = `
     <h2>What the weekly check searches for</h2>
     <div class="card">
       <p class="note">Entered here once, never in chat. Stored only in your own account.${state.profile ? '' : ' <b>Not filled in yet:</b> until you save, the check uses the details Reed set up on your PC.'}</p>
-      <form id="meForm" novalidate>
       <label for="names">Name variants (one per line, full name first)</label>
       <textarea id="names" rows="3">${esc((p.names || []).join('\n'))}</textarea>
       <label for="cityState">Current city and state</label>
-      <input id="cityState" value="${esc(p.city_state || '')}" placeholder="Springfield, IL" autocomplete="off">
+      <input id="cityState" form="meForm" value="${esc(p.city_state || '')}" placeholder="Springfield, IL" autocomplete="off">
       <label for="birthYear">Birth year (to tell you apart from relatives with your name)</label>
-      <input id="birthYear" value="${esc(p.birth_year || '')}" inputmode="numeric" placeholder="1980" autocomplete="off">
-      <label for="addrs">Current and past addresses (one per line)</label>
-      <textarea id="addrs" rows="3">${esc((p.addresses || []).join('\n'))}</textarea>
-      <label for="phone">Phone</label>
-      <input id="phone" value="${esc(p.phone || '')}" inputmode="tel" autocomplete="off">
-      <div style="margin-top:12px"><button class="btn" type="submit" id="saveMe">Save</button></div>
-      </form>
+      <input id="birthYear" form="meForm" value="${esc(p.birth_year || '')}" inputmode="numeric" placeholder="1980" autocomplete="off">
+      ${listBlock('phones', 'Phones (each one is searched on the sites that look up numbers)', draft.phones, fmtPhone, '(555) 010-0199', 'tel')}
+      ${listBlock('addresses', 'Current and past addresses (each city is searched too)', draft.addresses, (x) => x, '123 Main St, Springfield IL, 62701', 'text')}
+      <form id="meForm" novalidate style="margin-top:14px"><button class="btn" type="submit" id="saveMe">Save</button>
+        <span class="note" id="unsaved"></span></form>
       <div class="err" id="meErr"></div><div class="ok" id="meOk"></div>
     </div>`;
+  KEEP.forEach((id, i) => { if (keep[i] !== undefined) document.getElementById(id).value = keep[i]; }); // re-render keeps what's typed
+  const err = document.getElementById('meErr');
+  const dirty = () => {
+    const same = (a, b) => JSON.stringify(a || []) === JSON.stringify(b || []);
+    document.getElementById('unsaved').textContent =
+      same(draft.phones, p.phones) && same(draft.addresses, p.addresses) ? '' : ' Not saved yet.';
+  };
+  dirty();
+  const adders = { phones: addPhone, addresses: addAddress };
+  for (const key of Object.keys(adders)) {
+    document.getElementById(`${key}Form`).onsubmit = (e) => {
+      e.preventDefault();
+      const box = document.getElementById(`${key}New`);
+      if (!box.value.trim()) return;
+      const r = adders[key](draft[key], box.value);
+      if (r.error) { err.textContent = r.error; return; }
+      draft[key] = r.list; err.textContent = ''; box.value = '';
+      meView(); document.getElementById(`${key}New`).focus();
+    };
+  }
+  app.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => {
+    draft[b.dataset.del].splice(Number(b.dataset.i), 1); meView();
+  }));
   document.getElementById('meForm').onsubmit = async (e) => {
     e.preventDefault();
-    const lines = (id) => document.getElementById(id).value.split('\n').map((s) => s.trim()).filter(Boolean);
-    const names = lines('names'), addresses = lines('addrs');
+    const ok = document.getElementById('meOk');
+    err.textContent = ''; ok.textContent = '';
+    // Something typed in an add box but not added yet: add it now rather than silently dropping it.
+    for (const key of Object.keys(adders)) {
+      const v = document.getElementById(`${key}New`).value;
+      if (!v.trim()) continue;
+      const r = adders[key](draft[key], v);
+      if (r.error) return (err.textContent = r.error);
+      draft[key] = r.list; document.getElementById(`${key}New`).value = '';
+    }
+    const names = document.getElementById('names').value.split('\n').map((s) => s.trim()).filter(Boolean);
     const cityState = document.getElementById('cityState').value.trim();
     const birthYear = parseYear(document.getElementById('birthYear').value);
-    const phone = document.getElementById('phone').value.trim();
-    const err = document.getElementById('meErr'), ok = document.getElementById('meOk');
-    err.textContent = ''; ok.textContent = '';
     if (!names.length || names[0].split(/\s+/).length < 2) return (err.textContent = 'Add at least one full name, like Jordan A. Sample.');
     if (!/^[A-Za-z .'-]+,?\s+[A-Za-z]{2}$/.test(cityState)) return (err.textContent = 'City and state like Springfield, IL.');
     if (!birthYear) return (err.textContent = 'Birth year as 4 digits, like 1980.');
-    if (phone && phone.replace(/\D/g, '').length !== 10) return (err.textContent = 'Phone needs 10 digits, like (555) 010-0199.');
-    try { await store.saveProfile(user.id, { names, addresses, cityState, phone, birthYear }); }
+    try { await store.saveProfile(user.id, { names, addresses: draft.addresses, cityState, phones: draft.phones, birthYear }); }
     catch (x) { return (err.textContent = `Didn't save: ${x.message}`); }
+    meView.draft = null;
     await reload();
-    document.getElementById('meOk').textContent = `Saved. Next weekly check searches ${names.length} name${names.length > 1 ? 's' : ''}.`;
+    const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
+    document.getElementById('meOk').textContent =
+      `Saved. Next weekly check searches ${n(names.length, 'name')}, ${n(draft.phones.length, 'phone')} and ${n(draft.addresses.length, 'address')}`.replace('addresss', 'addresses') + '.';
   };
 }
 
 // Sign in: email -> 6-digit code typed here (same as People CRM; one login for both apps).
 function loginView() {
+  meView.draft = null;
   user = null; state = { sites: [], runs: [], profile: null };
   document.querySelector('nav').hidden = true; document.getElementById('me').textContent = ''; lastRunLine();
   app.innerHTML = `<form class="card" id="lf" novalidate>

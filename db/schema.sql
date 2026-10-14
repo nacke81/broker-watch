@@ -8,10 +8,21 @@ create table if not exists public.bw_profile (            -- what the weekly che
   names       text[] not null default '{}',
   addresses   text[] not null default '{}',
   city_state  text not null default '',
-  phone       text not null default '',
+  phones      text[] not null default '{}',
   birth_year  int check (birth_year between 1900 and 2020),
   updated_at  timestamptz not null default now()
 );
+
+-- Slice 1 (2026-10-14): one phone -> a list of phones. Idempotent: copies the old single value once, then drops it.
+alter table public.bw_profile add column if not exists phones text[] not null default '{}';
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+             where table_schema = 'public' and table_name = 'bw_profile' and column_name = 'phone') then
+    execute $q$update public.bw_profile set phones = array[phone] where phone <> '' and cardinality(phones) = 0$q$;
+    execute 'alter table public.bw_profile drop column phone';
+  end if;
+end $$;
 
 create table if not exists public.bw_runs (               -- one row per weekly run, written by the job
   id          uuid primary key default gen_random_uuid(),
@@ -42,6 +53,9 @@ create table if not exists public.bw_checks (             -- one row per site pe
   captcha     boolean not null default false,
   unique (run_id, site)
 );
+
+-- Slice 1: which query found it (alt-first-name | past-city-N | phone-N | address-N; null = the plain name search).
+alter table public.bw_checks add column if not exists query text;
 
 create table if not exists public.bw_optouts (            -- the owner marks "I sent the opt-out"
   owner       uuid not null default auth.uid() references auth.users(id) on delete cascade,
