@@ -12,6 +12,8 @@
   header { background:var(--ink); color:#fff; padding:14px 16px 0; position:sticky; top:0; z-index:2; }
   header h1 { margin:0 0 2px; font-size:20px; }
   header .sub { font-size:13px; color:#c9d1db; }
+  header .sub a { color:#fff; }
+  nav[hidden] { display:none; }
   .banner { background:#fff3cd; color:#5c4400; font-size:13px; padding:6px 16px; }
   nav { display:flex; gap:4px; margin-top:10px; }
   nav button { flex:1; background:none; border:0; color:#c9d1db; padding:10px 4px; font-size:15px; border-bottom:3px solid transparent; cursor:pointer; }
@@ -61,14 +63,15 @@
 <header>
   <h1>Broker Watch</h1>
   <div class="sub" id="lastRun"></div>
-  <nav role="tablist">
+  <div class="sub" id="me"></div>
+  <nav role="tablist" hidden>
     <button role="tab" data-tab="sites" aria-selected="true">Sites</button>
     <button role="tab" data-tab="runs" aria-selected="false">Runs</button>
     <button role="tab" data-tab="me" aria-selected="false">My details</button>
   </nav>
 </header>
-<div class="banner">Prototype: fake person ("Jordan Sample"), fake results. Nothing is checked or sent.</div>
 <main id="app"></main>
+<script src="vendor/supabase-2.117.3.js"></script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

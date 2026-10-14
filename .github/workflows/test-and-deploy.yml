@@ -1,5 +1,5 @@
 name: test-and-deploy
-# Every push runs the syntax check and tests. The site only deploys if everything passes.
+# Every push runs the syntax check and every golden test. The site only deploys if everything passes.
 on:
   push:
     branches: [main]
@@ -19,15 +19,35 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+      - run: npm ci
       - name: Syntax check (.mjs copies; plain .js passes broken ESM)
         run: for f in site/*.js; do cp "$f" /tmp/chk.mjs && node --check /tmp/chk.mjs || exit 1; done
-      - name: Golden 3 + status rules
+      - name: Status rules (couldn't check is never not found)
         run: npm test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Golden 1-3 - the judge on saved real pages (personal details scrubbed)
+        run: python -m py_compile job/*.py && python tests/golden_judge.py
+      - name: Privacy - a second account and logged-out visitors read 0 rows (hosted database)
+        run: node tests/isolation.mjs
+      - name: Install browser
+        run: pip install playwright && python -m playwright install --with-deps --only-shell chromium
+      - name: End to end - sign in, see a run's results, mark an opt-out, save details (real browser, hosted database)
+        run: |
+          python -m http.server 8831 --bind 127.0.0.1 --directory site &
+          sleep 1
+          python tests/e2e.py http://127.0.0.1:8831/ "$SUPABASE_URL" "$SUPABASE_ANON_KEY" "$SUPABASE_SECRET_KEY"
 
   deploy:
     needs: test

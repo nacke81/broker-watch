@@ -1,37 +1,47 @@
 import { siteStatus, sortSites, summary, runHistory, sortedChecks, fmtDate, STATUS, LADDER, RESULT } from './logic.js';
-import { SITES, PERSON } from './seed.js';
+import { createStore } from './store.js';
+import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
-const KEY = 'broker-watch-proto-v1';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const store = createStore(sb);
 const app = document.getElementById('app');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// Prototype state: seed + Mike's local clicks (opt-out marks, details). Saved on first load.
-function load() {
+// Real state, loaded from the database after sign-in. Same shapes the prototype used.
+let state = { sites: [], runs: [], profile: null };
+let user = null;
+async function reload() {
+  delete document.body.dataset.loaded;
   try {
-    const saved = JSON.parse(localStorage.getItem(KEY));
-    if (saved && saved.sites) return saved;
-  } catch { /* fall through to seed */ }
-  const fresh = { sites: structuredClone(SITES), person: structuredClone(PERSON) };
-  localStorage.setItem(KEY, JSON.stringify(fresh));
-  return fresh;
+    state = await store.load();
+  } catch (e) {
+    app.innerHTML = `<div class="card err">Couldn't load your results: ${esc(e.message)}. <a href="#" onclick="location.reload()">Try again</a></div>`;
+    return;
+  }
+  document.body.dataset.loaded = '1';
+  route();
 }
-let state = load();
-const save = () => localStorage.setItem(KEY, JSON.stringify(state));
+async function act(fn) { // every write: do it, then reload from the database so the screen shows what's stored
+  try { await fn(); } catch (e) { alert(`Didn't save: ${e.message}`); }
+  await reload();
+}
 
 const CLS = {
   [STATUS.FOUND]: 's-found', [STATUS.CAME_BACK]: 's-came-back', [STATUS.COULDNT]: 's-couldnt',
   [STATUS.REQUESTED]: 's-requested', [STATUS.GONE]: 's-gone', [STATUS.NOT_FOUND]: 's-not-found', [STATUS.NEVER]: 's-never',
 };
 const pill = (st) => `<span class="pill ${CLS[st]}">${esc(st)}</span>`;
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => day(new Date());
+const listedNow = (site) => [STATUS.FOUND, STATUS.CAME_BACK, STATUS.REQUESTED].includes(siteStatus(site));
 
+const day = (ts) => new Date(ts).toLocaleDateString('en-CA'); // local YYYY-MM-DD
 function lastRunLine() {
-  const h = runHistory(state.sites);
-  document.getElementById('lastRun').textContent = h.length
-    ? `Last weekly check ${fmtDate(h[0].date)} · next ${fmtDate(nextWeek(h[0].date))}`
-    : 'No checks yet';
+  const ok = state.runs.find((r) => r.status === 'ok');
+  document.getElementById('lastRun').textContent = !user ? ''
+    : ok ? `Last weekly check ${fmtDate(day(ok.finished_at))} · next ${fmtDate(nextSunday())}`
+    : 'No weekly check yet · first one Sunday';
 }
-function nextWeek(d) { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 7); return x.toISOString().slice(0, 10); }
+function nextSunday() { const x = new Date(); x.setDate(x.getDate() + ((7 - x.getDay()) % 7 || 7)); return day(x); }
 
 function sitesView() {
   const s = summary(state.sites);
@@ -41,6 +51,11 @@ function sitesView() {
     ['Clean', (st) => st === STATUS.GONE || st === STATUS.NOT_FOUND || st === STATUS.NEVER],
   ];
   const sorted = sortSites(state.sites);
+  if (!state.runs.length) {
+    app.innerHTML = `<div class="card" data-testid="welcome"><b>No weekly check has run yet.</b>
+      <p class="note">The check runs Sundays at 10am on your PC and fills this page. Meanwhile, check <a href="#me">My details</a>.</p></div>`;
+    return;
+  }
   app.innerHTML = `
     <div class="tiles">
       <div class="tile"><b>${s.listed}</b><span>listing you</span></div>
@@ -64,7 +79,8 @@ function rowHtml(site) {
   if (st === STATUS.COULDNT) meta = `Blocked: tried ${site.tried?.length ?? 0} of 7 ladder steps`;
   if (st === STATUS.REQUESTED) meta = `Opt-out sent ${fmtDate(site.optOutSentOn)} · still listed`;
   if (st === STATUS.CAME_BACK) meta = `Was gone, listed again ${fmtDate(last.date)}`;
-  return `<button class="row" data-site="${site.id}">
+  if (site.siteGone) meta = 'Site shut down (court order)';
+  return `<button class="row" data-site="${site.id}" data-testid="row">
       <div class="grow"><div class="name">${esc(site.name)}</div><div class="meta">${meta}</div></div>
       ${pill(st)}
     </button>`;
@@ -88,11 +104,13 @@ function siteView(id) {
         const cls = tried.has(n) ? 'failed' : n === next ? 'next' : '';
         return `<li class="${cls}">${esc(l)}${n === next ? ' ← next' : ''}</li>`;
       }).join('')}</ol>
-      ${next === 6 ? `<button class="btn" id="loop">Open it so I can solve the check</button>` : ''}
+      ${next === 6 && site.url ? `<a class="btn" href="${esc(site.url)}" target="_blank" rel="noopener">Open it so I can solve the check</a>` : ''}
+      ${site.captcha ? `<p class="note">The site showed a CAPTCHA or bot wall this week.</p>` : ''}
       ${next === 7 ? `<p class="note">Only paid options left. Nothing is spent without your yes.</p><button class="btn ghost" id="paid">Ask me about a paid option</button>` : ''}
       <div class="ok" id="loopMsg"></div></div>`;
   } else if (last) {
-    ladder = `<p class="note">Checked ${fmtDate(last.date)} using step ${last.step}: ${esc(LADDER[last.step])}.</p>`;
+    ladder = `<p class="note">Checked ${fmtDate(last.date)}${last.step ? ` using step ${last.step}: ${esc(LADDER[last.step])}` : ''}.</p>
+      ${listedNow(site) && site.url ? `<p><a href="${esc(site.url)}" target="_blank" rel="noopener">See the page it found</a></p>` : ''}`;
   }
 
   app.innerHTML = `
@@ -123,61 +141,124 @@ function siteView(id) {
 
   document.getElementById('back').onclick = () => go('#sites');
   const sent = document.getElementById('sent');
-  if (sent) sent.onclick = () => { site.optOutSentOn = today(); save(); siteView(id); };
+  if (sent) sent.onclick = () => act(() => store.markSent(user.id, site.name, today()));
   const unsent = document.getElementById('unsent');
-  if (unsent) unsent.onclick = () => { delete site.optOutSentOn; save(); siteView(id); };
-  const loop = document.getElementById('loop');
-  if (loop) loop.onclick = () => { document.getElementById('loopMsg').textContent = 'In the real app this opens the page for you to solve the check, then asks "Is this you?" with one tap.'; };
+  if (unsent) unsent.onclick = () => act(() => store.unmarkSent(site.name));
   const paid = document.getElementById('paid');
-  if (paid) paid.onclick = () => { document.getElementById('loopMsg').textContent = 'In the real app this sends Reed a request; he comes back with a price for your yes or no.'; };
+  if (paid) paid.onclick = () => { document.getElementById('loopMsg').textContent = 'Coming in a later slice. For now, tell Reed in chat: he comes back with a price for your yes or no.'; };
 }
 
 function runsView() {
-  const h = runHistory(state.sites);
+  const rows = state.runs;
   app.innerHTML = `
     <h2>Weekly checks</h2>
-    <div class="card"><table>
-      <tr><th>Week</th><th class="n">Found</th><th class="n">Not there</th><th class="n">Couldn't check</th></tr>
-      ${h.map((r) => `<tr><td>${fmtDate(r.date)}</td><td class="n">${r.found}</td><td class="n">${r.not_found}</td><td class="n">${r.couldnt_check}</td></tr>`).join('')}
+    <div class="card"><table data-testid="runs">
+      <tr><th>Week</th><th class="n">Found</th><th class="n">Not there</th><th class="n">Couldn't check</th><th class="n">CAPTCHAs</th></tr>
+      ${rows.map((r) => r.status === 'ok'
+        ? `<tr><td>${fmtDate(day(r.started_at))}</td><td class="n">${r.found}</td><td class="n">${r.not_found + r.gone}</td><td class="n">${r.couldnt}</td><td class="n">${r.captchas}</td></tr>`
+        : `<tr><td>${fmtDate(day(r.started_at))}</td><td colspan="4" class="${r.status === 'failed' ? 'err' : 'note'}">${r.status === 'failed' ? 'Failed. Reed was alerted.' : 'Running now...'}</td></tr>`).join('')
+        || '<tr><td colspan="5" class="note">No runs yet.</td></tr>'}
     </table>
     <p class="note">Every run checks all ${state.sites.length} sites. If a run fails or doesn't happen, Reed gets an alert.</p></div>`;
 }
 
+const parseYear = (s) => { const y = Number(String(s).trim()); return Number.isInteger(y) && y >= 1900 && y <= 2020 ? y : null; };
 function meView() {
-  const p = state.person;
+  const p = state.profile || {};
   app.innerHTML = `
     <h2>What the weekly check searches for</h2>
     <div class="card">
-      <p class="note">Entered here once, never in chat. Stored only in your own account.</p>
-      <label for="names">Name variants (one per line)</label>
-      <textarea id="names" rows="3">${esc(p.names.join('\n'))}</textarea>
+      <p class="note">Entered here once, never in chat. Stored only in your own account.${state.profile ? '' : ' <b>Not filled in yet:</b> until you save, the check uses the details Reed set up on your PC.'}</p>
+      <form id="meForm" novalidate>
+      <label for="names">Name variants (one per line, full name first)</label>
+      <textarea id="names" rows="3">${esc((p.names || []).join('\n'))}</textarea>
+      <label for="cityState">Current city and state</label>
+      <input id="cityState" value="${esc(p.city_state || '')}" placeholder="Springfield, IL" autocomplete="off">
+      <label for="birthYear">Birth year (to tell you apart from relatives with your name)</label>
+      <input id="birthYear" value="${esc(p.birth_year || '')}" inputmode="numeric" placeholder="1980" autocomplete="off">
       <label for="addrs">Current and past addresses (one per line)</label>
-      <textarea id="addrs" rows="3">${esc(p.addresses.join('\n'))}</textarea>
+      <textarea id="addrs" rows="3">${esc((p.addresses || []).join('\n'))}</textarea>
       <label for="phone">Phone</label>
-      <input id="phone" value="${esc(p.phone)}" inputmode="tel" autocomplete="off">
-      <div style="margin-top:12px"><button class="btn" id="saveMe">Save</button></div>
+      <input id="phone" value="${esc(p.phone || '')}" inputmode="tel" autocomplete="off">
+      <div style="margin-top:12px"><button class="btn" type="submit" id="saveMe">Save</button></div>
+      </form>
       <div class="err" id="meErr"></div><div class="ok" id="meOk"></div>
     </div>`;
-  document.getElementById('saveMe').onclick = () => {
-    const names = document.getElementById('names').value.split('\n').map((s) => s.trim()).filter(Boolean);
-    const addrs = document.getElementById('addrs').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  document.getElementById('meForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const lines = (id) => document.getElementById(id).value.split('\n').map((s) => s.trim()).filter(Boolean);
+    const names = lines('names'), addresses = lines('addrs');
+    const cityState = document.getElementById('cityState').value.trim();
+    const birthYear = parseYear(document.getElementById('birthYear').value);
     const phone = document.getElementById('phone').value.trim();
     const err = document.getElementById('meErr'), ok = document.getElementById('meOk');
     err.textContent = ''; ok.textContent = '';
-    if (!names.length) return (err.textContent = 'Add at least one name.');
+    if (!names.length || names[0].split(/\s+/).length < 2) return (err.textContent = 'Add at least one full name, like Jordan A. Sample.');
+    if (!/^[A-Za-z .'-]+,?\s+[A-Za-z]{2}$/.test(cityState)) return (err.textContent = 'City and state like Springfield, IL.');
+    if (!birthYear) return (err.textContent = 'Birth year as 4 digits, like 1980.');
     if (phone && phone.replace(/\D/g, '').length !== 10) return (err.textContent = 'Phone needs 10 digits, like (555) 010-0199.');
-    state.person = { names, addresses: addrs, phone };
-    save();
-    ok.textContent = `Saved. Next weekly check searches ${names.length} name${names.length > 1 ? 's' : ''}.`;
+    try { await store.saveProfile(user.id, { names, addresses, cityState, phone, birthYear }); }
+    catch (x) { return (err.textContent = `Didn't save: ${x.message}`); }
+    await reload();
+    document.getElementById('meOk').textContent = `Saved. Next weekly check searches ${names.length} name${names.length > 1 ? 's' : ''}.`;
   };
+}
+
+// Sign in: email -> 6-digit code typed here (same as People CRM; one login for both apps).
+function loginView() {
+  user = null; state = { sites: [], runs: [], profile: null };
+  document.querySelector('nav').hidden = true; document.getElementById('me').textContent = ''; lastRunLine();
+  app.innerHTML = `<form class="card" id="lf" novalidate>
+      <p>Sign in with your email. We'll send a 6-digit code.</p>
+      <input id="email" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com">
+      <div style="margin-top:10px"><button class="btn" type="submit" style="width:100%">Email me a code</button></div>
+      <div class="err" id="lerr"></div>
+    </form>`;
+  document.getElementById('lf').onsubmit = async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('email').value.trim().toLowerCase();
+    const err = document.getElementById('lerr');
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { err.textContent = "That email doesn't look right."; return; }
+    err.textContent = 'Sending...';
+    const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+    if (error) { err.textContent = /signups? not allowed|not found/i.test(error.message) ? "That email isn't set up for this app." : error.message; return; }
+    codeView(email);
+  };
+}
+function codeView(email) {
+  app.innerHTML = `<form class="card" id="cf" novalidate>
+      <p>Code sent to <b>${esc(email)}</b>. Type it here.</p>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="••••••" style="letter-spacing:.3em;font-size:22px;text-align:center">
+      <div style="margin-top:10px"><button class="btn" type="submit" style="width:100%">Sign in</button></div>
+      <div class="err" id="cerr"></div>
+      <p class="note"><a href="#" id="again">Use a different email</a></p>
+    </form>`;
+  document.getElementById('code').focus();
+  document.getElementById('again').onclick = (e) => { e.preventDefault(); loginView(); };
+  document.getElementById('cf').onsubmit = async (e) => {
+    e.preventDefault();
+    const token = document.getElementById('code').value.replace(/\D/g, '');
+    const { error } = await sb.auth.verifyOtp({ email, token, type: 'email' });
+    if (error) document.getElementById('cerr').textContent = "That code didn't work. Check it, or send a new one.";
+  };
+}
+async function enter(session) {
+  user = session.user;
+  document.querySelector('nav').hidden = false;
+  document.getElementById('me').innerHTML = `${esc(user.email)} · <a href="#" id="signout">Sign out</a>`;
+  document.getElementById('signout').onclick = async (e) => { e.preventDefault(); await sb.auth.signOut(); };
+  app.innerHTML = '<div class="note">Loading...</div>';
+  await reload();
 }
 
 function go(hash) { if (location.hash !== hash) location.hash = hash; else route(); }
 function route() {
+  if (!user) return;
   const h = location.hash || '#sites';
   const tab = h.startsWith('#runs') ? 'runs' : h.startsWith('#me') ? 'me' : 'sites';
   document.querySelectorAll('nav button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   lastRunLine();
+  if (!document.body.dataset.loaded) return;
   if (h.startsWith('#site/')) siteView(h.slice(6));
   else if (tab === 'runs') runsView();
   else if (tab === 'me') meView();
@@ -186,4 +267,13 @@ function route() {
 }
 document.querySelectorAll('nav button').forEach((b) => (b.onclick = () => go('#' + b.dataset.tab)));
 window.addEventListener('hashchange', route);
-route();
+
+let current;
+sb.auth.onAuthStateChange((event, session) => {
+  const id = session?.user?.id || null;
+  if (id === current) return; // token refreshes don't redraw
+  current = id;
+  setTimeout(() => (session ? enter(session) : loginView()), 0);
+});
+// Test hook: lets the hosted end-to-end check drive the real code screen without spending the email quota.
+window.__bw_codeView = codeView;

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { siteStatus, STATUS, summary, runHistory, sortSites } from '../site/logic.js';
-import { SITES } from '../site/seed.js';
+import { SITES } from './seed.js';
 
 const site = (results, extra = {}) => ({
   name: 'X',
