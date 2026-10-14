@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright
 
 base, sb_url, pub, secret = sys.argv[1:5]
 run = str(int(time.time()))[-7:]
-email = f"bw-e2e-{run}@example.com"
+email = f"bw-e2e-{run}-{os.urandom(3).hex()}@example.com"  # unique even if CI and a local run start the same second
 A = {"apikey": secret, "Authorization": "Bearer " + secret, "Content-Type": "application/json", "Prefer": "return=representation"}
 ok = []
 
