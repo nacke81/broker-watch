@@ -122,7 +122,7 @@ function siteView(id) {
       ${listed ? `<p><b>What it shows:</b> ${esc(site.shows)}</p>` : st === STATUS.COULDNT ? '' : `<p>No listing for you here.</p>`}
       ${ladder}
       <div class="hist">${checks.map((c) => `<i class="${c.result}" title="${fmtDate(c.date)}: ${c.result.replace('_', ' ')}"></i>`).join('')}</div>
-      <div class="legend">Last ${checks.length} weeks, oldest first. Red found · green not there · amber couldn't check</div>
+      <div class="legend">Last ${checks.length} week${checks.length === 1 ? "" : "s"}, oldest first. Red found · green not there · amber couldn't check</div>
     </div>
     ${listed ? `<div class="card">
       <b>Opt out</b>
