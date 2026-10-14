@@ -178,76 +178,104 @@ function listBlock(key, label, items, show, placeholder, mode) {
     </div>`;
 }
 
+// My details saves itself (slice 2, Mike 2026-10-14: "autosave everything, drop the Save button"). In slice 1 his
+// edits never reached the database because Save was easy to miss. Each change writes only its own field, the screen
+// then shows the row the database sent back, and a bad value is never written.
+const meStatus = { text: '', kind: '' };   // survives re-renders: 'Saved 2:14 PM' / "Didn't save: ..."
+let saveChain = Promise.resolve();         // saves run one at a time, in the order they were made
+
 function meView() {
   const p = state.profile || {};
-  const draft = (meView.draft ||= { phones: [...(p.phones || [])], addresses: [...(p.addresses || [])] });
   const KEEP = ['names', 'cityState', 'birthYear', 'phonesNew', 'addressesNew'];
   const keep = KEEP.map((id) => document.getElementById(id)?.value);
+  const focusId = KEEP.includes(document.activeElement?.id) ? document.activeElement.id : null; // a save landing mid-typing keeps your cursor
   app.innerHTML = `
     <h2>What the weekly check searches for</h2>
     <div class="card">
-      <p class="note">Entered here once, never in chat. Stored only in your own account.${state.profile ? '' : ' <b>Not filled in yet:</b> until you save, the check uses the details Reed set up on your PC.'}</p>
+      <p class="note">Entered here once, never in chat. Stored only in your own account. Changes save as you make them.${state.profile ? '' : ' <b>Not filled in yet:</b> until you do, the check uses the details Reed set up on your PC.'}</p>
       <label for="names">Name variants (one per line, full name first)</label>
       <textarea id="names" rows="3">${esc((p.names || []).join('\n'))}</textarea>
       <label for="cityState">Current city and state</label>
-      <input id="cityState" form="meForm" value="${esc(p.city_state || '')}" placeholder="Springfield, IL" autocomplete="off">
+      <input id="cityState" value="${esc(p.city_state || '')}" placeholder="Springfield, IL" autocomplete="off" enterkeyhint="done">
       <label for="birthYear">Birth year (to tell you apart from relatives with your name)</label>
-      <input id="birthYear" form="meForm" value="${esc(p.birth_year || '')}" inputmode="numeric" placeholder="1980" autocomplete="off">
-      ${listBlock('phones', 'Phones (each one is searched on the sites that look up numbers)', draft.phones, fmtPhone, '(555) 010-0199', 'tel')}
-      ${listBlock('addresses', 'Current and past addresses (each city is searched too)', draft.addresses, (x) => x, '123 Main St, Springfield IL, 62701', 'text')}
-      <form id="meForm" novalidate style="margin-top:14px"><button class="btn" type="submit" id="saveMe">Save</button>
-        <span class="note" id="unsaved"></span></form>
-      <div class="err" id="meErr"></div><div class="ok" id="meOk"></div>
+      <input id="birthYear" value="${esc(p.birth_year || '')}" inputmode="numeric" placeholder="1980" autocomplete="off" enterkeyhint="done">
+      ${listBlock('phones', 'Phones (each one is searched on the sites that look up numbers)', p.phones || [], fmtPhone, '(555) 010-0199', 'tel')}
+      ${listBlock('addresses', 'Current and past addresses (each city is searched too)', p.addresses || [], (x) => x, '123 Main St, Springfield IL, 62701', 'text')}
+      <div class="err" id="meErr"></div>
+      <div class="${meStatus.kind === 'err' ? 'err' : 'ok'}" id="meStatus" data-testid="me-status">${esc(meStatus.text)}</div>
     </div>`;
   KEEP.forEach((id, i) => { if (keep[i] !== undefined) document.getElementById(id).value = keep[i]; }); // re-render keeps what's typed
+  if (focusId) document.getElementById(focusId).focus();
   const err = document.getElementById('meErr');
-  const dirty = () => {
-    const same = (a, b) => JSON.stringify(a || []) === JSON.stringify(b || []);
-    document.getElementById('unsaved').textContent =
-      same(draft.phones, p.phones) && same(draft.addresses, p.addresses) ? '' : ' Not saved yet.';
+  const show = (text, kind) => {
+    Object.assign(meStatus, { text, kind });
+    const el = document.getElementById('meStatus');
+    if (el) { el.textContent = text; el.className = kind === 'err' ? 'err' : 'ok'; }
   };
-  dirty();
+  // `change` gets the latest saved row, so two quick adds can't build on the same old list and drop one.
+  const save = (change, after) => {
+    err.textContent = ''; show('Saving…', 'ok');
+    saveChain = saveChain.then(async () => {
+      try {
+        const fields = change(state.profile || {});
+        if (fields.error) throw new Error(fields.error);
+        state.profile = await store.saveFields(user.id, fields);
+        show(`Saved ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`, 'ok');
+      } catch (x) {
+        show(`Didn't save: ${x.message}. Nothing was changed.`, 'err');
+      }
+      if ((location.hash || '').startsWith('#me')) { meView(); after?.(); }
+    });
+    return saveChain;
+  };
+  // Lists: add or remove writes the whole list for that field.
   const adders = { phones: addPhone, addresses: addAddress };
   for (const key of Object.keys(adders)) {
-    document.getElementById(`${key}Form`).onsubmit = (e) => {
-      e.preventDefault();
-      const box = document.getElementById(`${key}New`);
-      if (!box.value.trim()) return;
-      const r = adders[key](draft[key], box.value);
+    const box = document.getElementById(`${key}New`);
+    const add = (keepFocus) => {
+      const v = box.value;
+      if (!v.trim()) return;
+      const r = adders[key](p[key] || [], v);   // checked now for the friendly error; rebuilt from the latest row below
       if (r.error) { err.textContent = r.error; return; }
-      draft[key] = r.list; err.textContent = ''; box.value = '';
-      meView(); document.getElementById(`${key}New`).focus();
+      box.value = '';
+      save((cur) => { const x = adders[key](cur[key] || [], v); return x.error ? x : { [key]: x.list }; },
+        keepFocus ? () => document.getElementById(`${key}New`).focus() : null);
     };
+    // Chrome fires `change` on Return before `submit`, so both paths go through add(); the second finds an empty box.
+    // Return keeps the cursor here for the next one; typed-then-tapped-elsewhere still saves (the slice-1 miss).
+    document.getElementById(`${key}Form`).onsubmit = (e) => { e.preventDefault(); add(true); };
+    box.onchange = () => add(document.activeElement === box);
   }
-  app.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => {
-    draft[b.dataset.del].splice(Number(b.dataset.i), 1); meView();
-  }));
-  document.getElementById('meForm').onsubmit = async (e) => {
-    e.preventDefault();
-    const ok = document.getElementById('meOk');
-    err.textContent = ''; ok.textContent = '';
-    // Something typed in an add box but not added yet: add it now rather than silently dropping it.
-    for (const key of Object.keys(adders)) {
-      const v = document.getElementById(`${key}New`).value;
-      if (!v.trim()) continue;
-      const r = adders[key](draft[key], v);
-      if (r.error) return (err.textContent = r.error);
-      draft[key] = r.list; document.getElementById(`${key}New`).value = '';
-    }
-    const names = document.getElementById('names').value.split('\n').map((s) => s.trim()).filter(Boolean);
-    const cityState = document.getElementById('cityState').value.trim();
-    const birthYear = parseYear(document.getElementById('birthYear').value);
-    if (!names.length || names[0].split(/\s+/).length < 2) return (err.textContent = 'Add at least one full name, like Jordan A. Sample.');
-    if (!/^[A-Za-z .'-]+,?\s+[A-Za-z]{2}$/.test(cityState)) return (err.textContent = 'City and state like Springfield, IL.');
-    if (!birthYear) return (err.textContent = 'Birth year as 4 digits, like 1980.');
-    try { await store.saveProfile(user.id, { names, addresses: draft.addresses, cityState, phones: draft.phones, birthYear }); }
-    catch (x) { return (err.textContent = `Didn't save: ${x.message}`); }
-    meView.draft = null;
-    await reload();
-    const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
-    document.getElementById('meOk').textContent =
-      `Saved. Next weekly check searches ${n(names.length, 'name')}, ${n(draft.phones.length, 'phone')} and ${n(draft.addresses.length, 'address')}`.replace('addresss', 'addresses') + '.';
+  app.querySelectorAll('[data-del]').forEach((b) => {
+    b.onclick = () => {
+      const key = b.dataset.del, gone = (p[key] || [])[Number(b.dataset.i)];
+      save((cur) => ({ [key]: (cur[key] || []).filter((x) => x !== gone) }));   // by value, not position
+    };
+  });
+  // Single fields: save when you leave the field (or press Return), after our own check.
+  const fields = {
+    names: () => {
+      const names = document.getElementById('names').value.split('\n').map((s) => s.trim()).filter(Boolean);
+      return !names.length || names[0].split(/\s+/).length < 2 ? { error: 'Add at least one full name, like Jordan A. Sample.' } : { value: names };
+    },
+    cityState: () => {
+      const v = document.getElementById('cityState').value.trim();
+      return /^[A-Za-z .'-]+,?\s+[A-Za-z]{2}$/.test(v) ? { value: v } : { error: 'City and state like Springfield, IL.' };
+    },
+    birthYear: () => {
+      const y = parseYear(document.getElementById('birthYear').value);
+      return y ? { value: y } : { error: 'Birth year as 4 digits, like 1980.' };
+    },
   };
+  for (const [id, read] of Object.entries(fields)) {
+    const el = document.getElementById(id);
+    el.onchange = () => {
+      const r = read();
+      if (r.error) { err.textContent = r.error; show("Not saved: fix the field above.", 'err'); return; }
+      save(() => ({ [id]: r.value }));
+    };
+    if (el.tagName === 'INPUT') el.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } };
+  }
 }
 
 // Sign in: email -> 6-digit code typed here (same as People CRM; one login for both apps).

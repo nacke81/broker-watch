@@ -2,7 +2,7 @@
 Usage: python tests/e2e.py <base_url> <supabase_url> <publishable_key> <secret_key>
 A throwaway account gets one weekly run written the way job/run.py writes it (secret key, owner stamped), then:
 logged out shows sign-in only; sign in with a real one-time code; the run's results show up (found / couldn't
-check never as not found); mark an opt-out and see it stored; save My details and see the row; sign out.
+check never as not found); mark an opt-out and see it stored; change My details (autosave) and see each change in the row; sign out.
 The account and its rows are deleted at the end. Exit 1 on any failure."""
 import glob, json, os, sys, time, urllib.request
 from playwright.sync_api import sync_playwright
@@ -70,39 +70,74 @@ try:
         pg.locator("nav [data-tab=runs]").click(); pg.wait_for_selector("[data-testid=runs]")
         check("Runs tab shows the run with its CAPTCHA count", "10/18/2026" in pg.locator("[data-testid=runs]").inner_text())
         pg.locator("nav [data-tab=me]").click(); pg.wait_for_selector("#names")
-        pg.fill("#names", "Jordan A. Sample\nJordy Sample"); pg.fill("#cityState", "Springfield, IL"); pg.fill("#birthYear", "19x0")
-        pg.locator("#saveMe").click()
-        check("bad birth year gets our own friendly error", "Birth year as 4 digits" in pg.locator("#meErr").inner_text())
-        pg.fill("#birthYear", "1980")
-        # Phones and addresses are lists: Return on the keyboard adds, the box clears and keeps focus for the next one.
-        pg.fill("#phonesNew", "(555) 010-0199"); pg.press("#phonesNew", "Enter")
+        # Slice 2: My details saves itself. Every check below reads the DATABASE, never the screen alone.
+        check("no Save button any more", pg.locator("#saveMe").count() == 0)
+        prof = lambda: (api("GET", f"/rest/v1/bw_profile?owner=eq.{uid}&select=names,city_state,birth_year,phones,addresses") or [{}])[0]
+        def saved():
+            pg.wait_for_function("document.querySelector('#meStatus') && /^Saved/.test(document.querySelector('#meStatus').textContent)")
+        def until(cond, what):  # the write is async; give the database up to 10 s to show it
+            for _ in range(40):
+                v = prof()
+                if cond(v): return v
+                time.sleep(0.25)
+            return prof()
+        pg.fill("#names", "Jordan A. Sample\nJordy Sample"); pg.locator("#cityState").focus(); saved()
+        v = until(lambda v: v.get("names") == ["Jordan A. Sample", "Jordy Sample"], "names")
+        check(f"names save on leaving the box, no button ({v.get('names')})", v.get("names") == ["Jordan A. Sample", "Jordy Sample"])
+        pg.fill("#cityState", "Springfield, IL"); pg.press("#cityState", "Enter"); saved()
+        check("city saves on Return", until(lambda v: v.get("city_state") == "Springfield, IL", "city").get("city_state") == "Springfield, IL")
+        pg.fill("#birthYear", "19x0"); pg.locator("#names").focus()
+        check("bad birth year: our friendly error, and nothing written",
+              "Birth year as 4 digits" in pg.locator("#meErr").inner_text() and "Not saved" in pg.locator("#meStatus").inner_text()
+              and prof().get("birth_year") is None)
+        pg.fill("#birthYear", "1980"); pg.press("#birthYear", "Enter"); saved()
+        check("birth year saves once it's valid", until(lambda v: v.get("birth_year") == 1980, "by").get("birth_year") == 1980)
+        # Lists: Return adds AND writes; the box clears and keeps focus for the next one.
+        pg.fill("#phonesNew", "(555) 010-0199"); pg.press("#phonesNew", "Enter"); saved()
         check("Return adds a phone, clears the box, keeps focus",
               "(555) 010-0199" in pg.locator("[data-testid=phones-list]").inner_text() and pg.input_value("#phonesNew") == ""
               and pg.evaluate("document.activeElement.id") == "phonesNew")
+        check("…and the phone is in the database without pressing anything", until(lambda v: v.get("phones") == ["5550100199"], "p").get("phones") == ["5550100199"])
+        # Two quick adds back to back: neither may be lost (each save builds on the last saved row).
         pg.fill("#phonesNew", "555 010 0200"); pg.locator("#phonesAdd").click()
-        pg.fill("#phonesNew", "+1 555.010.0199"); pg.press("#phonesNew", "Enter")
-        check("same phone in another format is kept once", pg.locator("[data-testid=phones-list] li").count() == 2)
+        pg.fill("#phonesNew", "555 010 0201"); pg.locator("#phonesAdd").click(); saved()
+        v = until(lambda v: v.get("phones") == ["5550100199", "5550100200", "5550100201"], "3p")
+        check(f"two quick adds both land in the database ({len(v.get('phones') or [])} phones)", v.get("phones") == ["5550100199", "5550100200", "5550100201"])
+        pg.fill("#phonesNew", "+1 555.010.0199"); pg.press("#phonesNew", "Enter"); saved()
+        check("same phone in another format is kept once", pg.locator("[data-testid=phones-list] li").count() == 3 and len(prof()["phones"]) == 3)
         pg.fill("#phonesNew", "123"); pg.press("#phonesNew", "Enter")
-        check("short phone gets our friendly error, not added", "10 digits" in pg.locator("#meErr").inner_text()
-              and pg.locator("[data-testid=phones-list] li").count() == 2)
+        check("short phone: friendly error, not added, nothing written", "10 digits" in pg.locator("#meErr").inner_text()
+              and pg.locator("[data-testid=phones-list] li").count() == 3 and len(prof()["phones"]) == 3)
         pg.fill("#phonesNew", "")
-        pg.fill("#addressesNew", "123 Example St, Springfield IL, 62701"); pg.press("#addressesNew", "Enter")
+        pg.locator("[data-del=phones][data-i='2']").click(); saved()
+        check("Remove writes to the database", until(lambda v: v.get("phones") == ["5550100199", "5550100200"], "rm").get("phones") == ["5550100199", "5550100200"])
+        pg.fill("#addressesNew", "123 Example St, Springfield IL, 62701"); pg.press("#addressesNew", "Enter"); saved()
         pg.fill("#addressesNew", "somewhere"); pg.press("#addressesNew", "Enter")
         check("address without city/state gets our friendly error", "city and state" in pg.locator("#meErr").inner_text())
-        pg.fill("#addressesNew", "45 Old Rd, Shelbyville, IL"); pg.press("#addressesNew", "Enter")
-        pg.fill("#addressesNew", "9 Gone Ln, Ogden IL")
-        pg.locator("[data-del=addresses][data-i='0']").click()
-        check("Remove drops one address and keeps the typed-but-not-added one", pg.locator("[data-testid=addresses-list] li").count() == 1
-              and pg.input_value("#addressesNew") == "9 Gone Ln, Ogden IL")
-        check("unsaved changes are flagged", "Not saved yet" in pg.locator("#unsaved").inner_text())
-        pg.locator("#saveMe").click(); pg.wait_for_selector("#meOk:has-text('Saved')")
-        check("save message counts phones and addresses", "2 phones and 2 addresses" in pg.locator("#meOk").inner_text())
-        prof = api("GET", f"/rest/v1/bw_profile?owner=eq.{uid}&select=names,city_state,birth_year,phones,addresses")
-        check(f"My details row is real ({prof})", prof == [{"names": ["Jordan A. Sample", "Jordy Sample"], "city_state": "Springfield, IL",
-              "birth_year": 1980, "phones": ["5550100199", "5550100200"], "addresses": ["45 Old Rd, Shelbyville, IL", "9 Gone Ln, Ogden IL"]}])
+        pg.fill("#addressesNew", "45 Old Rd, Shelbyville, IL"); pg.press("#addressesNew", "Enter"); saved()
+        # Typed but never added, then tapped elsewhere: the slice-1 miss. It must still be saved.
+        pg.fill("#addressesNew", "9 Gone Ln, Ogden IL"); pg.locator("#names").focus(); saved()
+        v = until(lambda v: v.get("addresses") == ["123 Example St, Springfield IL, 62701", "45 Old Rd, Shelbyville, IL", "9 Gone Ln, Ogden IL"], "a3")
+        check(f"an address typed and left (no Return, no button) is still saved ({len(v.get('addresses') or [])})", len(v.get("addresses") or []) == 3)
+        # Typed one address, then tapped Remove on another: Remove drops its row, the typed one is saved, nothing lost.
+        pg.fill("#addressesNew", "7 Half Typed Rd, Ogden IL")
+        pg.locator("[data-del=addresses][data-i='0']").click(); saved()
+        A3 = ["45 Old Rd, Shelbyville, IL", "9 Gone Ln, Ogden IL", "7 Half Typed Rd, Ogden IL"]
+        v = until(lambda v: v.get("addresses") == A3, "rm-a")
+        check(f"Remove drops its address in the DB; the one being typed is saved, not lost ({len(v.get('addresses') or [])})", v.get("addresses") == A3)
+        # A write the database refuses: the screen says so and keeps showing what's really stored.
+        pg.route("**/rest/v1/bw_profile**", lambda r: r.fulfill(status=500, body='{"message":"forced failure"}') if r.request.method == "POST" else r.continue_())
+        pg.fill("#phonesNew", "555 010 0299"); pg.press("#phonesNew", "Enter")
+        pg.wait_for_function("/Didn't save/.test(document.querySelector('#meStatus').textContent)")
+        check("a failed write says Didn't save and the list shows only what's stored",
+              pg.locator("[data-testid=phones-list] li").count() == 2 and prof()["phones"] == ["5550100199", "5550100200"])
+        pg.unroute("**/rest/v1/bw_profile**")
+        prof_all = prof()
+        check(f"My details row is real ({prof_all})", prof_all == {"names": ["Jordan A. Sample", "Jordy Sample"], "city_state": "Springfield, IL",
+              "birth_year": 1980, "phones": ["5550100199", "5550100200"], "addresses": A3})
         pg.reload(); pg.wait_for_selector("body[data-loaded]"); pg.locator("nav [data-tab=me]").click(); pg.wait_for_selector("#phonesNew")
         check("after a reload the lists come back from the database", pg.locator("[data-testid=phones-list] li").count() == 2
-              and "Not saved yet" not in pg.locator("#unsaved").inner_text())
+              and pg.locator("[data-testid=addresses-list] li").count() == 3)
         pg.locator("#signout").click(); pg.wait_for_selector("#email")
         check("sign out returns to the sign-in screen with nothing shown", pg.locator("[data-testid=row]").count() == 0)
         check(f"no page errors ({errs})", not errs)

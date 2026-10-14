@@ -43,5 +43,13 @@ export function createStore(sb) {
       must(await sb.from("bw_profile").upsert({ owner, names: p.names, addresses: p.addresses, city_state: p.cityState,
         phones: p.phones, birth_year: p.birthYear, updated_at: new Date().toISOString() }));
     },
+    // Autosave (slice 2): write only the changed field(s) and return the row as the database now holds it,
+    // so the screen shows what was actually stored, not what we hoped was stored.
+    async saveFields(owner, fields) {
+      const col = { names: "names", addresses: "addresses", phones: "phones", cityState: "city_state", birthYear: "birth_year" };
+      const row = { owner, updated_at: new Date().toISOString() };
+      for (const [k, v] of Object.entries(fields)) row[col[k]] = v;
+      return must(await sb.from("bw_profile").upsert(row).select("*").single());
+    },
   };
 }
