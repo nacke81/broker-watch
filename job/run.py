@@ -83,22 +83,54 @@ def subject(profile, E, fake=False):
 
 # ---------------- Chrome with the saved profile (step 3+) ----------------
 
+FRESH_MARKER = "--broker-watch-fresh"  # on the step-2 Chrome's command line, so a leak check can find it
+STARTED = {"pid": None}  # the saved-profile Chrome THIS process launched (None = we started nothing, so we kill nothing)
+
+
+def cdp_up():
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def kill_tree(pid):
+    """Kill a process and every child it forked (Chrome forks many). Best effort, never raises."""
+    if not pid:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            import signal
+            os.kill(pid, signal.SIGKILL)
+    except Exception as e:
+        print(f"kill_tree {pid} failed: {type(e).__name__}", flush=True)
+
+
 def ensure_chrome():
-    def up():
-        try:
-            urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=3)
-            return True
-        except Exception:
-            return False
-    if up():
+    """Saved-profile Chrome on CDP_PORT. Launches one only if none is up, and remembers it (STARTED) so stop_chrome()
+    closes exactly what this process started. A Chrome that was already up (the owner mid-solve) is never ours to kill."""
+    if cdp_up():
         return "already running"
-    subprocess.Popen([CHROME, f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={BW}/chrome-profile",
-                      "--no-first-run", "about:blank"], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    proc = subprocess.Popen([CHROME, f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={BW}/chrome-profile",
+                             "--no-first-run", "about:blank"], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    STARTED["pid"] = proc.pid  # set before waiting, so a failed start is cleaned up too
     for _ in range(30):
         time.sleep(1)
-        if up():
+        if cdp_up():
             return "started"
     raise RuntimeError("the Broker Watch Chrome (port 9333) did not start")
+
+
+def stop_chrome():
+    """Close the saved-profile Chrome iff this process started it. Safe to call twice."""
+    pid, STARTED["pid"] = STARTED["pid"], None
+    if pid:
+        kill_tree(pid)
+        print("chrome (saved profile): closed", flush=True)
 
 
 # ---------------- alerts ----------------
@@ -191,50 +223,58 @@ def run(a, E):
     with sync_playwright() as pw:
         F = {1: HttpFetcher(block_host)}
         fresh_b = None
-        if 2 in steps:
-            fresh_b = pw.chromium.launch(channel="chrome", headless=False, args=["--window-position=40,40"])
-            F[2] = BrowserFetcher(fresh_b.new_context(viewport={"width": 1280, "height": 800}), "chrome-fresh", block_host=block_host)
-        if any(s >= 3 for s in steps):
-            print("chrome (saved profile):", ensure_chrome(), flush=True)
-            F[3] = BrowserFetcher(pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}").contexts[0],
-                                  "chrome-profile", human=True, block_host=block_host)
-        def attempt(step, site, fn, variant=None):
-            st = state[site]
-            t0 = time.time()
-            try:
-                r = fn()
-            except Exception as e:
-                r = {"verdict": "couldnt", "error": f"{type(e).__name__}: {str(e)[:100]}"}
-            r["step"], r["secs"] = step, round(time.time() - t0, 1)
-            if variant:
-                r["variant"] = variant
-            st["log"].append(r)
-            st["best"] = ladder.better(st["best"], r)
-            print(f"{site:22} step {step}{' ' + variant if variant else ''}: {r['verdict']:8} page={r.get('page')} "
-                  f"ev={r.get('evidence')}{' CAPTCHA' if r.get('captcha') else ''} {r.get('error', '')}", flush=True)
-            if r["verdict"] in ("me", "gone"):
-                st["done"] = True
+        try:
+            if 2 in steps:
+                fresh_b = pw.chromium.launch(channel="chrome", headless=False, args=["--window-position=40,40", FRESH_MARKER])
+                F[2] = BrowserFetcher(fresh_b.new_context(viewport={"width": 1280, "height": 800}), "chrome-fresh", block_host=block_host)
+            if any(s >= 3 for s in steps):
+                print("chrome (saved profile):", ensure_chrome(), flush=True)
+                F[3] = BrowserFetcher(pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}").contexts[0],
+                                      "chrome-profile", human=True, block_host=block_host)
+            def attempt(step, site, fn, variant=None):
+                st = state[site]
+                t0 = time.time()
+                try:
+                    r = fn()
+                except Exception as e:
+                    r = {"verdict": "couldnt", "error": f"{type(e).__name__}: {str(e)[:100]}"}
+                r["step"], r["secs"] = step, round(time.time() - t0, 1)
+                if variant:
+                    r["variant"] = variant
+                st["log"].append(r)
+                if os.environ.get("BW_TEST_RAISE_AFTER_FIRST_SITE"):  # test hook: a crash mid-run, after one site was tried
+                    raise RuntimeError("injected crash (BW_TEST_RAISE_AFTER_FIRST_SITE)")
+                st["best"] = ladder.better(st["best"], r)
+                print(f"{site:22} step {step}{' ' + variant if variant else ''}: {r['verdict']:8} page={r.get('page')} "
+                      f"ev={r.get('evidence')}{' CAPTCHA' if r.get('captcha') else ''} {r.get('error', '')}", flush=True)
+                if r["verdict"] in ("me", "gone"):
+                    st["done"] = True
 
-        for step in steps:  # rounds: one step across every open site, so no site gets a burst of hits
-            if step == 5:  # change the query: other first name, past cities, each phone, each address
-                Q = {s: step5_queries(p, s) for s in sites}
-                for k in range(max([len(q) for q in Q.values()] or [0])):  # round-robin: query k on every site, then k+1
-                    for site in sites:
-                        if state[site]["done"] or k >= len(Q[site]):
-                            continue
-                        variant, kind, url = Q[site][k]
-                        attempt(5, site, lambda: ladder.run_step(F[3], site, url, p, site in NONE_ON_404 and kind == "name",
-                                                                 saver(f"s5-{variant}"), cards=(kind == "name")), variant)
-                continue
-            for site in sites:
-                if state[site]["done"]:
+            for step in steps:  # rounds: one step across every open site, so no site gets a burst of hits
+                if step == 5:  # change the query: other first name, past cities, each phone, each address
+                    Q = {s: step5_queries(p, s) for s in sites}
+                    for k in range(max([len(q) for q in Q.values()] or [0])):  # round-robin: query k on every site, then k+1
+                        for site in sites:
+                            if state[site]["done"] or k >= len(Q[site]):
+                                continue
+                            variant, kind, url = Q[site][k]
+                            attempt(5, site, lambda: ladder.run_step(F[3], site, url, p, site in NONE_ON_404 and kind == "name",
+                                                                     saver(f"s5-{variant}"), cards=(kind == "name")), variant)
                     continue
-                if step in (1, 2, 3):
-                    attempt(step, site, lambda: ladder.run_step(F[step], site, urls[site], p, site in NONE_ON_404, saver(f"s{step}")))
-                else:
-                    attempt(step, site, lambda: ladder.side_door(F[3], site, urls[site], p, saver("s4")))
-        if fresh_b:
-            fresh_b.close()
+                for site in sites:
+                    if state[site]["done"]:
+                        continue
+                    if step in (1, 2, 3):
+                        attempt(step, site, lambda: ladder.run_step(F[step], site, urls[site], p, site in NONE_ON_404, saver(f"s{step}")))
+                    else:
+                        attempt(step, site, lambda: ladder.side_door(F[3], site, urls[site], p, saver("s4")))
+        finally:  # whatever happened above, close every Chrome this run launched
+            if fresh_b:
+                try:
+                    fresh_b.close()
+                except Exception:
+                    pass
+            stop_chrome()
 
     today = dt.date.today().isoformat()
     checks, counts = [], {"found": 0, "not_found": 0, "couldnt_check": 0, "gone": 0}
@@ -310,6 +350,8 @@ def main():
                             prefer="return=minimal")
             except Exception:
                 pass
+        if os.environ.get("BW_TEST_NO_ALERT"):  # leak test only: a crash test must not text the owner or open a card
+            sys.exit(1)
         alert(f"Broker Watch weekly run FAILED: {type(e).__name__}: {str(e)[:200]}", "failed-" + dt.datetime.now().strftime("%Y%m%d-%H%M"))
         sys.exit(1)
 

@@ -81,6 +81,13 @@ def write_result(db, site, best):
 
 
 def solve(site, E, dry=False, wait_s=WAIT_S):
+    try:
+        return _solve(site, E, dry, wait_s)
+    finally:  # the window the owner solved in closes after the solve or the timeout, and on a crash; a Chrome already up is left alone
+        R.stop_chrome()
+
+
+def _solve(site, E, dry=False, wait_s=WAIT_S):
     from playwright.sync_api import sync_playwright
     from fetchers import BrowserFetcher
     reader = R.DB(E)
