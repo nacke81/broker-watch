@@ -22,7 +22,8 @@ from sites import NONE_ON_404, SITES, STATES, site_urls, step5_queries  # noqa: 
 
 BW = os.path.expandvars(r"%LOCALAPPDATA%/broker-watch")
 ENV_FILE = os.path.expandvars(r"%LOCALAPPDATA%/hermes/.env")
-CDP_PORT = 9333
+CDP_PORT = int(os.environ.get("BW_CDP_PORT") or 9333)  # env overrides are for tests (scratch port + profile)
+PROFILE_DIR = os.environ.get("BW_PROFILE_DIR") or f"{BW}/chrome-profile"
 CHROME = r"C:/Program Files/Google/Chrome/Application/chrome.exe"
 TELEGRAM = "telegram:6554402525"
 APP_URL = "https://nacke81.github.io/broker-watch/"
@@ -115,7 +116,7 @@ def ensure_chrome():
     closes exactly what this process started. A Chrome that was already up (the owner mid-solve) is never ours to kill."""
     if cdp_up():
         return "already running"
-    proc = subprocess.Popen([CHROME, f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={BW}/chrome-profile",
+    proc = subprocess.Popen([CHROME, f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={PROFILE_DIR}",
                              "--no-first-run", "about:blank"], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
     STARTED["pid"] = proc.pid  # set before waiting, so a failed start is cleaned up too
     for _ in range(30):
@@ -125,12 +126,61 @@ def ensure_chrome():
     raise RuntimeError("the Broker Watch Chrome (port 9333) did not start")
 
 
-def stop_chrome():
-    """Close the saved-profile Chrome iff this process started it. Safe to call twice."""
+def cdp_browser_close(port, timeout=5):
+    """Ask Chrome to quit itself over CDP (Browser.close) so it flushes cookies to the profile. Stdlib websocket, no deps.
+    Returns True if the command was sent."""
+    import base64, json, socket
+    try:
+        ws = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=3))["webSocketDebuggerUrl"]
+        m = re.match(r"ws://([^/:]+):(\d+)(/.*)", ws)
+        host, prt, path = m.group(1), int(m.group(2)), m.group(3)
+        sk = socket.create_connection((host, prt), timeout=timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        sk.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}:{prt}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        if b" 101 " not in sk.recv(4096).split(b"\r\n")[0]:
+            return False
+        payload = b'{"id":1,"method":"Browser.close"}'
+        mask = os.urandom(4)
+        sk.sendall(b"\x81" + bytes([0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+        try:
+            sk.recv(4096)  # the reply (or the socket closing) means Chrome got it
+        except Exception:
+            pass
+        sk.close()
+        return True
+    except Exception as e:
+        print(f"cdp close failed: {type(e).__name__}", flush=True)
+        return False
+
+
+def pid_alive(pid):
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, timeout=30,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    return f" {pid} " in out
+
+
+def stop_chrome(grace_s=10):
+    """Close the saved-profile Chrome iff this process started it. Graceful first (CDP Browser.close, so cookies reach the
+    profile on disk), wait up to grace_s for it to exit, then taskkill /T /F as the fallback. Safe to call twice."""
     pid, STARTED["pid"] = STARTED["pid"], None
-    if pid:
-        kill_tree(pid)
-        print("chrome (saved profile): closed", flush=True)
+    if not pid:
+        return
+    how = "force-killed"
+    if cdp_browser_close(CDP_PORT):
+        t0 = time.time()
+        while time.time() - t0 < grace_s and pid_alive(pid):
+            time.sleep(0.25)
+        if not pid_alive(pid):
+            how = "closed gracefully"
+    kill_tree(pid)  # force path, or a sweep of stragglers in the tree we started (no-op if it already exited)
+    print(f"chrome (saved profile): {how}", flush=True)
 
 
 # ---------------- alerts ----------------
